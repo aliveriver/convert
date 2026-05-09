@@ -1,0 +1,9 @@
+langchain>=1.2.18
+langgraph>=1.1.10
+langchain-openai>=1.2.1
+langchain-anthropic>=1.4.3
+langsmith>=0.8.3
+python-docx>=1.2.0
+python-dotenv>=1.2.2
+PyYAML>=6.0.3
+pydantic>=2.13.4

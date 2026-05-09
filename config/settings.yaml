@@ -1,0 +1,32 @@
+llm:
+  provider: ${LLM_PROVIDER:-openai}
+  temperature: 0.2
+  max_tokens: 4096
+
+openai:
+  api_key: ${OPENAI_API_KEY}
+  base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  model: ${OPENAI_MODEL:-gpt-4o-mini}
+
+anthropic:
+  api_key: ${ANTHROPIC_API_KEY}
+  base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+  model: ${ANTHROPIC_MODEL:-claude-3-5-sonnet-latest}
+
+document:
+  # 0 表示不截断；LLM 会收到所有提取文本。
+  max_template_chars: 0
+  max_content_chars: 0
+  max_content_blocks: 0
+  content_block_text_limit: 0
+  default_paragraph_style: Normal
+
+langsmith:
+  enabled: ${LANGSMITH_TRACING:-false}
+  project: ${LANGSMITH_PROJECT:-word-template-agent}
+  endpoint: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+  api_key: ${LANGSMITH_API_KEY}
+  run_name: ${LANGSMITH_RUN_NAME:-word_generation}
+  tags:
+    - word-agent
+    - langgraph

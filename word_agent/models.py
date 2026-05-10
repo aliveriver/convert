@@ -53,9 +53,10 @@ class AgentState(TypedDict, total=False):
     output_path: Path
     template_profile: dict
     content_profile: dict
-    content_text: str
     format_requirements: str
     content_analysis: str
+    content_block_count: int
+    content_analysis_chunk_count: int
     content_structure: ContentStructure
     generated_document: GeneratedDocument
     written_path: Path

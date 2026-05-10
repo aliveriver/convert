@@ -24,10 +24,63 @@ from langgraph.graph import END, START, StateGraph
 from word_agent.config import AppSettings, read_prompt
 from word_agent.docx_io import write_generated_docx
 from word_agent.llm import message_content_to_text, parse_generated_document_with_repair
-from word_agent.models import AgentState
+from word_agent.models import AgentState, ContentStructureItem, GeneratedDocument
 from word_agent.subagents import ContentDocumentAgent, TemplateDocumentAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _chunk_items(
+    items: list[ContentStructureItem],
+    chunk_size: int,
+) -> list[list[ContentStructureItem]]:
+    """Split structured content items for bounded final-generation calls."""
+
+    if chunk_size <= 0 or len(items) <= chunk_size:
+        return [items] if items else []
+    return [items[start : start + chunk_size] for start in range(0, len(items), chunk_size)]
+
+
+def _content_outline(items: list[ContentStructureItem]) -> list[dict[str, object]]:
+    """Build a compact heading outline to keep each generation chunk oriented."""
+
+    outline_roles = {"title", "heading_1", "heading_2", "heading_3"}
+    outline: list[dict[str, object]] = []
+    for item in items:
+        if item.role not in outline_roles:
+            continue
+        text = item.text.strip()
+        outline.append(
+            {
+                "source_index": item.source_index,
+                "role": item.role,
+                "text": text[:120],
+            }
+        )
+    return outline
+
+
+def _template_generation_context(profile: dict[str, object]) -> dict[str, object]:
+    """Expose only lightweight template hints needed during generation."""
+
+    return {
+        "sections": profile.get("sections", []),
+        "paragraph_styles": profile.get("paragraph_styles", []),
+        "table_count": len(profile.get("tables", [])),
+    }
+
+
+def _merge_generated_documents(
+    title_hint: str,
+    parts: list[GeneratedDocument],
+) -> GeneratedDocument:
+    """Combine chunk-level generation outputs into one renderable document."""
+
+    title = title_hint or next((part.title for part in parts if part.title.strip()), "")
+    paragraphs = []
+    for part in parts:
+        paragraphs.extend(part.paragraphs)
+    return GeneratedDocument(title=title, paragraphs=paragraphs)
 
 
 class WordAgent:
@@ -136,47 +189,77 @@ class WordAgent:
         start_time = perf_counter()
         logger.info("内容子 agent 开始分析: %s", state["content_path"])
         result = self.content_agent.run(state["content_path"])
-        block_count = len(result["content_profile"].get("blocks", []))
+        block_count = result.get("content_block_count", 0)
         item_count = len(result["content_structure"].items)
-        logger.info("内容子 agent 完成，内容块=%s，结构项=%s，耗时 %.2fs", block_count, item_count, perf_counter() - start_time)
+        chunk_count = result.get("content_analysis_chunk_count", 0)
+        logger.info(
+            "内容子 agent 完成，内容块=%s，分析分块=%s，结构项=%s，耗时 %.2fs",
+            block_count,
+            chunk_count,
+            item_count,
+            perf_counter() - start_time,
+        )
         return result
 
     def _generate_document(self, state: AgentState) -> AgentState:
         """生成可渲染到最终 DOCX 的 JSON 段落。"""
 
         start_time = perf_counter()
-        template_text_blocks = state["template_profile"].get("all_template_text_blocks", [])
-        logger.info("最终生成开始，模板块=%s，内容结构项=%s", len(template_text_blocks), len(state["content_structure"].items))
-        template_blocks_json = json.dumps(template_text_blocks, ensure_ascii=False, indent=2)
-        content_structure_json = state["content_structure"].model_dump_json(indent=2)
-        user_prompt = (
-            "模板全文块，供你核对格式要求、说明文字、示例文字和占位符：\n"
-            f"{template_blocks_json}\n\n"
-            "从模板分析得到的格式要求：\n"
-            f"{state['format_requirements']}\n\n"
-            "内容结构分析 JSON：\n"
-            f"{content_structure_json}\n\n"
-            "内容结构分析原文：\n"
-            f"{state['content_analysis']}\n\n"
-            "用户原始内容，保留事实但允许重组结构：\n"
-            f"{state['content_text']}"
+        content_structure = state["content_structure"]
+        content_items = content_structure.items
+        item_chunks = _chunk_items(content_items, self.settings.document.generation_chunk_size)
+        template_context = _template_generation_context(state["template_profile"])
+        outline = _content_outline(content_items)
+        logger.info(
+            "最终生成开始，内容结构项=%s，生成分块=%s",
+            len(content_items),
+            len(item_chunks),
         )
-        response = self.llm.invoke(
-            [
-                SystemMessage(content=self.generation_prompt),
-                HumanMessage(content=user_prompt),
-            ]
-        )
-        raw_response = message_content_to_text(response)
-        logger.debug("最终生成 LLM 原始响应前 1000 字: %s", raw_response[:1000])
-        try:
-            generated_document = parse_generated_document_with_repair(self.llm, raw_response)
-        except Exception:
-            debug_path = state["output_path"].with_suffix(".generation.raw.txt")
-            debug_path.parent.mkdir(parents=True, exist_ok=True)
-            debug_path.write_text(raw_response, encoding="utf-8")
-            logger.exception("最终生成 JSON 解析和修复均失败，原始响应已保存: %s", debug_path)
-            raise
+        generated_parts: list[GeneratedDocument] = []
+        for chunk_index, item_chunk in enumerate(item_chunks, start=1):
+            chunk_payload = {
+                "document_title": content_structure.title,
+                "chunk_index": chunk_index,
+                "chunk_count": len(item_chunks),
+                "outline": outline,
+                "items": [item.model_dump() for item in item_chunk],
+            }
+            user_prompt = (
+                "请根据模板要求和当前内容分块生成可写入 Word 的 JSON。"
+                "全文内容已经在上游完成分块结构化分析；你本次只能生成当前分块对应的段落，"
+                "不要补写当前分块没有提供的事实，也不要重复生成其他分块的正文。\n\n"
+                "可用模板样式和轻量版式信息：\n"
+                f"{json.dumps(template_context, ensure_ascii=False, indent=2)}\n\n"
+                "从模板分析得到的格式要求：\n"
+                f"{state['format_requirements']}\n\n"
+                "当前内容分块 JSON：\n"
+                f"{json.dumps(chunk_payload, ensure_ascii=False, indent=2)}"
+            )
+            response = self.llm.invoke(
+                [
+                    SystemMessage(content=self.generation_prompt),
+                    HumanMessage(content=user_prompt),
+                ]
+            )
+            raw_response = message_content_to_text(response)
+            logger.debug("最终生成分块 %s/%s LLM 原始响应前 1000 字: %s", chunk_index, len(item_chunks), raw_response[:1000])
+            try:
+                generated_part = parse_generated_document_with_repair(self.llm, raw_response)
+            except Exception:
+                debug_path = state["output_path"].with_suffix(f".generation.chunk-{chunk_index}.raw.txt")
+                debug_path.parent.mkdir(parents=True, exist_ok=True)
+                debug_path.write_text(raw_response, encoding="utf-8")
+                logger.exception("最终生成分块 JSON 解析和修复均失败，原始响应已保存: %s", debug_path)
+                raise
+            generated_parts.append(generated_part)
+            logger.info(
+                "最终生成分块完成 %s/%s，段落数=%s",
+                chunk_index,
+                len(item_chunks),
+                len(generated_part.paragraphs),
+            )
+
+        generated_document = _merge_generated_documents(content_structure.title, generated_parts)
         logger.info(
             "最终生成完成，标题=%s，段落数=%s，耗时 %.2fs",
             generated_document.title,

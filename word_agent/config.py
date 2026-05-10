@@ -38,6 +38,9 @@ class DocumentSettings:
     max_content_chars: int
     max_content_blocks: int
     content_block_text_limit: int
+    content_analysis_chunk_size: int
+    content_analysis_chunk_overlap: int
+    generation_chunk_size: int
     default_paragraph_style: str
 
 
@@ -122,6 +125,9 @@ def load_settings(config_path: Path = Path("config/settings.yaml")) -> AppSettin
         max_content_chars=int(data["document"].get("max_content_chars", 0)),
         max_content_blocks=int(data["document"].get("max_content_blocks", 0)),
         content_block_text_limit=int(data["document"].get("content_block_text_limit", 0)),
+        content_analysis_chunk_size=int(data["document"].get("content_analysis_chunk_size", 32)),
+        content_analysis_chunk_overlap=int(data["document"].get("content_analysis_chunk_overlap", 3)),
+        generation_chunk_size=int(data["document"].get("generation_chunk_size", 24)),
         default_paragraph_style=data["document"].get("default_paragraph_style", "Normal"),
     )
     langsmith_data = data.get("langsmith", {})

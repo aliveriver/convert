@@ -19,6 +19,10 @@ document:
   max_content_chars: 0
   max_content_blocks: 0
   content_block_text_limit: 0
+  # 分块只限制单次 LLM 输入，不限制 DOCX 全文提取。
+  content_analysis_chunk_size: 32
+  content_analysis_chunk_overlap: 3
+  generation_chunk_size: 24
   default_paragraph_style: Normal
 
 langsmith:

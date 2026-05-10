@@ -52,6 +52,8 @@ class AgentState(TypedDict, total=False):
     content_path: Path
     output_path: Path
     template_profile: dict
+    template_block_count: int
+    template_cache_hit: bool
     content_profile: dict
     format_requirements: str
     content_analysis: str

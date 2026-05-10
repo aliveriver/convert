@@ -179,8 +179,14 @@ class WordAgent:
         start_time = perf_counter()
         logger.info("模板子 agent 开始分析: %s", state["template_path"])
         result = self.template_agent.run(state["template_path"])
-        block_count = len(result["template_profile"].get("all_template_text_blocks", []))
-        logger.info("模板子 agent 完成，全文块=%s，耗时 %.2fs", block_count, perf_counter() - start_time)
+        block_count = result.get("template_block_count", 0)
+        cache_hit = result.get("template_cache_hit", False)
+        logger.info(
+            "模板子 agent 完成，全文块=%s，缓存命中=%s，耗时 %.2fs",
+            block_count,
+            cache_hit,
+            perf_counter() - start_time,
+        )
         return result
 
     def _analyze_content(self, state: AgentState) -> AgentState:

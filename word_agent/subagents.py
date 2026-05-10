@@ -14,6 +14,7 @@ from time import perf_counter
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from word_agent.cache import TemplateAnalysisCache
 from word_agent.config import AppSettings, read_prompt
 from word_agent.docx_io import extract_content_profile, extract_template_profile
 from word_agent.llm import message_content_to_text, parse_content_structure_with_repair
@@ -88,6 +89,30 @@ def _compact_profile_for_state(profile: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _compact_template_profile_for_llm(profile: dict[str, object]) -> dict[str, object]:
+    """Keep template layout/style hints without repeating visible text blocks."""
+
+    return {
+        "path": profile.get("path"),
+        "sections": profile.get("sections", []),
+        "paragraph_styles": profile.get("paragraph_styles", []),
+        "tables": _table_summaries(profile),
+    }
+
+
+def _compact_template_profile_for_state(profile: dict[str, object]) -> dict[str, object]:
+    """Keep only generation-time template hints in LangGraph state and cache."""
+
+    return {
+        "path": profile.get("path"),
+        "sections": profile.get("sections", []),
+        "paragraph_styles": profile.get("paragraph_styles", []),
+        "tables": _table_summaries(profile),
+        "template_block_count": len(profile.get("all_template_text_blocks", [])),
+        "table_count": len(profile.get("tables", [])),
+    }
+
+
 def _append_unique(items: list[str], value: str) -> None:
     """Append text once while preserving first-seen order."""
 
@@ -134,24 +159,42 @@ class TemplateDocumentAgent:
         self.llm = llm
         self.settings = settings
         self.prompt = read_prompt(prompt_path)
+        self.cache = TemplateAnalysisCache(
+            cache_dir=settings.document.template_cache_dir,
+            enabled=settings.document.template_cache_enabled,
+        )
 
     def run(self, template_path: Path) -> dict[str, object]:
         """返回模板画像和 LLM 推断出的行文要求。"""
+
+        cache_key = self.cache.build_key(
+            template_path=template_path,
+            prompt=self.prompt,
+            provider=self.settings.llm.provider,
+            model=self.settings.llm.model,
+            max_template_chars=self.settings.document.max_template_chars,
+        )
+        cached = self.cache.load(cache_key)
+        if cached is not None and "template_profile" in cached and "format_requirements" in cached:
+            return {
+                "template_profile": cached["template_profile"],
+                "format_requirements": cached["format_requirements"],
+                "template_block_count": int(cached.get("template_block_count", 0)),
+                "template_cache_hit": True,
+            }
 
         profile = extract_template_profile(
             template_path,
             self.settings.document.max_template_chars,
         )
         block_count = len(profile.get("all_template_text_blocks", []))
-        profile_without_full_text = dict(profile)
-        profile_without_full_text.pop("all_template_text_blocks", None)
-        profile_without_full_text.pop("visible_text", None)
+        llm_profile = _compact_template_profile_for_llm(profile)
         logger.info("模板提取完成，全文块=%s，表格数=%s", block_count, len(profile.get("tables", [])))
         prompt = (
             "【模板全文块：请完整阅读，由你判断哪些是要求、示例、占位符或正文】\n"
             f"{json.dumps(profile.get('all_template_text_blocks', []), ensure_ascii=False, indent=2)}\n\n"
-            "【模板结构、样式、表格、页眉页脚等完整画像】\n"
-            f"{json.dumps(profile_without_full_text, ensure_ascii=False, indent=2)}"
+            "【模板轻量结构、样式、表格尺寸、页眉页脚画像】\n"
+            f"{json.dumps(llm_profile, ensure_ascii=False, indent=2)}"
         )
         start_time = perf_counter()
         logger.info("调用 LLM 总结模板行文要求")
@@ -163,10 +206,14 @@ class TemplateDocumentAgent:
         )
         requirements = message_content_to_text(response)
         logger.info("模板要求总结完成，字符数=%s，耗时 %.2fs", len(requirements), perf_counter() - start_time)
-        return {
-            "template_profile": profile,
+        result = {
+            "template_profile": _compact_template_profile_for_state(profile),
             "format_requirements": requirements,
+            "template_block_count": block_count,
+            "template_cache_hit": False,
         }
+        self.cache.save(cache_key, result)
+        return result
 
 
 class ContentDocumentAgent:

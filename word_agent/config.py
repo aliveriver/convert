@@ -41,6 +41,8 @@ class DocumentSettings:
     content_analysis_chunk_size: int
     content_analysis_chunk_overlap: int
     generation_chunk_size: int
+    template_cache_enabled: bool
+    template_cache_dir: Path
     default_paragraph_style: str
 
 
@@ -128,6 +130,8 @@ def load_settings(config_path: Path = Path("config/settings.yaml")) -> AppSettin
         content_analysis_chunk_size=int(data["document"].get("content_analysis_chunk_size", 32)),
         content_analysis_chunk_overlap=int(data["document"].get("content_analysis_chunk_overlap", 3)),
         generation_chunk_size=int(data["document"].get("generation_chunk_size", 24)),
+        template_cache_enabled=_to_bool(data["document"].get("template_cache_enabled", True)),
+        template_cache_dir=Path(data["document"].get("template_cache_dir", "out/cache")),
         default_paragraph_style=data["document"].get("default_paragraph_style", "Normal"),
     )
     langsmith_data = data.get("langsmith", {})

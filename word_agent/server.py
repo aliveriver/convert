@@ -80,6 +80,14 @@ agent = WordAgent(llm=llm, settings=settings)
 async def root():
     return RedirectResponse(url="/frontend/index.html")
 
+@app.get("/convert")
+async def page_convert():
+    return RedirectResponse(url="/frontend/index.html")
+
+@app.get("/compare")
+async def page_compare():
+    return RedirectResponse(url="/frontend/compare.html")
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}

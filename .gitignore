@@ -220,3 +220,15 @@ __marimo__/
 
 
 AGENTS.md
+
+# Claude Code
+.claude/
+
+# Word agent cache
+word_agent/cache.py
+
+# Sample docx files
+*.docx
+
+# Output
+out/

@@ -257,8 +257,10 @@ def get_doc_diff(file1_path, file2_path):
             html1, html2 = _char_diff_html(text1, text2)
             fmt1 = _effective_format(paras1[i1]) if i1 < i2 else {}
             fmt2 = _effective_format(paras2[j1]) if j1 < j2 else {}
-            diff_results.append({
-                "type": "content_diff",
+            format_changes = _compare_format(fmt1, fmt2) if fmt1 and fmt2 else []
+            item_type = "both_diff" if format_changes else "content_diff"
+            item = {
+                "type": item_type,
                 "tag": tag,
                 "text1": text1,
                 "text2": text2,
@@ -266,6 +268,9 @@ def get_doc_diff(file1_path, file2_path):
                 "html2": html2,
                 "format1": fmt1,
                 "format2": fmt2,
-            })
+            }
+            if format_changes:
+                item["format_changes"] = format_changes
+            diff_results.append(item)
 
     return diff_results

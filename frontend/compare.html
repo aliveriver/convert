@@ -37,6 +37,12 @@
             background-color: #fefce8;
             border-color: #fde047;
         }
+
+        .both-diff {
+            background: linear-gradient(135deg, #fef2f2 50%, #fefce8 50%);
+            border-color: #f87171;
+            border-width: 2px;
+        }
         
         .equal-diff {
             background-color: #f9fafb;
@@ -114,6 +120,7 @@
                     <div class="flex space-x-4 text-sm text-gray-600">
                         <span class="flex items-center"><span class="w-3 h-3 bg-red-100 border border-red-300 inline-block mr-1 rounded"></span> 标红: 格式差异</span>
                         <span class="flex items-center"><span class="w-3 h-3 bg-yellow-100 border border-yellow-300 inline-block mr-1 rounded"></span> 标黄: 内容差异</span>
+                        <span class="flex items-center"><span class="w-3 h-3 inline-block mr-1 rounded" style="background: linear-gradient(135deg, #fef2f2 50%, #fefce8 50%); border: 1px solid #f87171;"></span> 红黄: 两者皆有</span>
                     </div>
                     <button type="submit" id="submit-btn" class="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-8 py-2.5 text-center transition-colors">
                         开始对比
@@ -137,7 +144,13 @@
         <div id="result-section" class="bg-white rounded-xl shadow-lg w-full max-w-6xl p-8 hidden">
             <div class="flex justify-between items-center mb-6">
                 <h2 class="text-xl font-bold text-gray-700">对比结果</h2>
-                <button id="reset-btn" class="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 text-sm font-semibold">重新上传</button>
+                <div class="flex items-center space-x-2">
+                    <span class="text-sm text-gray-500 mr-2">筛选:</span>
+                    <button data-filter="all" class="filter-btn px-3 py-1 text-xs font-medium rounded-full bg-blue-600 text-white">全部</button>
+                    <button data-filter="format" class="filter-btn px-3 py-1 text-xs font-medium rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300">仅格式</button>
+                    <button data-filter="content" class="filter-btn px-3 py-1 text-xs font-medium rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300">仅内容</button>
+                    <button id="reset-btn" class="ml-4 px-4 py-1 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 text-sm font-semibold">重新上传</button>
+                </div>
             </div>
             
             <div class="diff-container" id="diff-grid">
@@ -197,17 +210,20 @@
         function appendBlock(item) {
             const typeClass = item.type === 'equal' ? 'equal-diff'
                             : item.type === 'format_diff' ? 'format-diff'
+                            : item.type === 'both_diff' ? 'both-diff'
                             : 'content-diff';
 
             const block1 = document.createElement('div');
             block1.className = `diff-block ${typeClass}`;
+            block1.dataset.diffType = item.type;
             applyFormatStyle(block1, item.format1);
 
             const block2 = document.createElement('div');
             block2.className = `diff-block ${typeClass}`;
+            block2.dataset.diffType = item.type;
             applyFormatStyle(block2, item.format2);
 
-            if (item.type === 'content_diff' && item.html1 !== undefined) {
+            if ((item.type === 'content_diff' || item.type === 'both_diff') && item.html1 !== undefined) {
                 block1.innerHTML = item.html1 || '<em style="color:#9ca3af">(空白 / 缺少内容)</em>';
                 block2.innerHTML = item.html2 || '<em style="color:#9ca3af">(空白 / 缺少内容)</em>';
             } else {
@@ -226,6 +242,33 @@
             diffGrid.appendChild(block1);
             diffGrid.appendChild(block2);
         }
+
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.filter-btn').forEach(b => {
+                    b.classList.remove('bg-blue-600', 'text-white');
+                    b.classList.add('bg-gray-200', 'text-gray-700');
+                });
+                this.classList.remove('bg-gray-200', 'text-gray-700');
+                this.classList.add('bg-blue-600', 'text-white');
+
+                const filter = this.dataset.filter;
+                const blocks = diffGrid.querySelectorAll('.diff-block');
+                for (let i = 0; i < blocks.length; i += 2) {
+                    const b1 = blocks[i];
+                    const b2 = blocks[i + 1];
+                    const type = b1.dataset.diffType;
+                    let show = true;
+                    if (filter === 'format') {
+                        show = (type === 'format_diff' || type === 'both_diff');
+                    } else if (filter === 'content') {
+                        show = (type === 'content_diff' || type === 'both_diff');
+                    }
+                    b1.style.display = show ? '' : 'none';
+                    b2.style.display = show ? '' : 'none';
+                }
+            });
+        });
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();

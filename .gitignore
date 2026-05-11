@@ -227,8 +227,8 @@ AGENTS.md
 # Word agent cache
 word_agent/cache.py
 
-# Sample docx files
-*.docx
-
 # Output
 out/
+
+*.doc
+*.docx

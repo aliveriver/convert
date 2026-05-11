@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -218,8 +218,14 @@ async def convert(
         worker = threading.Thread(target=run_agent, daemon=True)
         worker.start()
 
+        yield f"data: {json.dumps({'step': 'init', 'file_id': file_id, 'log_url': f'/api/download-log/{file_id}'}, ensure_ascii=False)}\n\n"
+
         while True:
-            msg = progress_queue.get()
+            try:
+                msg = progress_queue.get(timeout=15)
+            except Empty:
+                yield ": keepalive\n\n"
+                continue
             if msg is None:
                 break
             yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"

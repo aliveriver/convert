@@ -214,6 +214,8 @@
                 'done': 100,
             };
 
+            let lastLogUrl = null;
+
             try {
                 setProgress(20, '正在上传到服务器...');
                 appendLog(`上传模板: ${templateFile.name} (${(templateFile.size/1024).toFixed(2)} KB)`);
@@ -233,7 +235,6 @@
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
-                let lastLogUrl = null;
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -249,6 +250,11 @@
                         try { data = JSON.parse(line.slice(6)); } catch { continue; }
 
                         if (data.log_url) lastLogUrl = data.log_url;
+
+                        if (data.step === 'init') {
+                            logLink.href = data.log_url;
+                            continue;
+                        }
 
                         if (data.step === 'error') {
                             if (lastLogUrl) {
@@ -296,6 +302,10 @@
                 appendLog(error.message, 'error');
 
                 downloadLink.classList.add('hidden');
+                if (lastLogUrl) {
+                    logLink.href = lastLogUrl;
+                    logLink.classList.remove('hidden');
+                }
                 resultActions.classList.remove('hidden');
             } finally {
                 submitBtn.disabled = false;

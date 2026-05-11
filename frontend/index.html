@@ -111,6 +111,10 @@
                     <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
                     下载转换结果
                 </a>
+                <a id="log-link" href="#" class="ml-4 px-6 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 font-semibold flex items-center shadow">
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                    下载日志
+                </a>
                 <button id="reset-btn" class="ml-4 px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 font-semibold shadow">
                     返回重试
                 </button>
@@ -134,6 +138,7 @@
         const logContainer = document.getElementById('log-container');
         const resultActions = document.getElementById('result-actions');
         const downloadLink = document.getElementById('download-link');
+        const logLink = document.getElementById('log-link');
         const resetBtn = document.getElementById('reset-btn');
 
         // Allow selection naming
@@ -165,10 +170,10 @@
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
-            
+
             const templateFile = templateInput.files[0];
             const contentFile = contentInput.files[0];
-            
+
             if (!templateFile || !contentFile) {
                 alert('请先选择两个需要处理的文件。');
                 return;
@@ -177,10 +182,12 @@
             // UI Adjustments
             statusBox.classList.remove('hidden');
             resultActions.classList.add('hidden');
+            downloadLink.classList.remove('hidden');
+            logLink.classList.add('hidden');
             submitBtn.disabled = true;
             submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
             logContainer.innerHTML = '';
-            
+
             appendLog('开始处理任务，准备进行网络请求...');
             setProgress(10, '正在打包文件...');
 
@@ -189,61 +196,107 @@
             formData.append('template', templateFile);
             formData.append('content', contentFile);
 
-            let fakeProgressInterval = null;
+            const stepLabels = {
+                'workflow': '工作流启动',
+                'analyze_template': '模板分析',
+                'analyze_content': '内容分析',
+                'generate_document': '文档生成',
+                'generate_chunk': '生成分块',
+                'write_docx': '写入 DOCX',
+            };
+
+            const stepProgress = {
+                'workflow': 15,
+                'analyze_template': 30,
+                'analyze_content': 30,
+                'generate_document': 50,
+                'write_docx': 85,
+                'done': 100,
+            };
 
             try {
-                setProgress(20, '正在上传到服务器，分析中 (请耐心等待)...');
+                setProgress(20, '正在上传到服务器...');
                 appendLog(`上传模板: ${templateFile.name} (${(templateFile.size/1024).toFixed(2)} KB)`);
                 appendLog(`上传内容: ${contentFile.name} (${(contentFile.size/1024).toFixed(2)} KB)`);
-                
-                // Fake progress bar since LLM generation is slow and polling isn't implemented
-                let p = 25;
-                fakeProgressInterval = setInterval(() => {
-                    if (p < 90) {
-                        p += Math.random() * 5;
-                        if(p > 90) p = 90;
-                        setProgress(p, '正在后台调用 LLM 处理并重组 Word 文档...');
-                        if(p > 40 && p < 45) appendLog('这可能需要一两分钟的时间，提取文本特征和格式中。');
-                        if(p > 70 && p < 75) appendLog('后端 WordAgent 正在生成最终排版结果...');
-                    }
-                }, 2000);
 
                 const response = await fetch('/api/convert', {
                     method: 'POST',
                     body: formData
                 });
 
-                clearInterval(fakeProgressInterval);
-
-                if (!response.ok) {
+                if (!response.ok && response.headers.get('content-type')?.includes('application/json')) {
                     const errJson = await response.json().catch(() => ({}));
                     const errMsg = errJson.detail || response.statusText;
-                    if (response.status === 429) {
-                        throw new Error(`请求被限流 (429): ${errMsg}`);
-                    }
                     throw new Error(`服务器返回错误: ${response.status} - ${errMsg}`);
                 }
 
-                const data = await response.json();
-                setProgress(100, '转换成功！');
-                progressText.classList.remove('animate-pulse');
-                progressText.classList.add('text-green-600', 'font-bold');
-                
-                appendLog(`服务器返回成功: File ID = ${data.file_id}`);
-                appendLog(`生成文件下载链接: ${data.download_url}`);
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let lastLogUrl = null;
 
-                downloadLink.href = data.download_url;
-                resultActions.classList.remove('hidden');
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        let data;
+                        try { data = JSON.parse(line.slice(6)); } catch { continue; }
+
+                        if (data.log_url) lastLogUrl = data.log_url;
+
+                        if (data.step === 'error') {
+                            if (lastLogUrl) {
+                                logLink.href = lastLogUrl;
+                                logLink.classList.remove('hidden');
+                            }
+                            throw new Error(data.detail || '转换过程中发生错误');
+                        }
+
+                        if (data.step === 'done') {
+                            setProgress(100, '转换成功！');
+                            progressText.classList.remove('animate-pulse');
+                            progressText.classList.add('text-green-600', 'font-bold');
+                            appendLog(`转换完成: File ID = ${data.file_id}`);
+                            downloadLink.href = data.download_url;
+                            if (data.log_url) {
+                                logLink.href = data.log_url;
+                                logLink.classList.remove('hidden');
+                            }
+                            resultActions.classList.remove('hidden');
+                            continue;
+                        }
+
+                        const label = stepLabels[data.step] || data.step;
+                        if (data.step === 'generate_chunk') {
+                            const chunkPct = 50 + Math.round((data.current / data.total) * 30);
+                            setProgress(chunkPct, `文档生成中 (${data.current}/${data.total})...`);
+                            appendLog(`${label}: ${data.current}/${data.total}`);
+                        } else if (data.status === 'started') {
+                            const pct = stepProgress[data.step] || 25;
+                            setProgress(pct, `${label} 进行中...`);
+                            appendLog(`${label} 开始`);
+                        } else if (data.status === 'completed') {
+                            appendLog(`${label} 完成 (${data.elapsed}s)`);
+                            const pct = (stepProgress[data.step] || 25) + 10;
+                            setProgress(Math.min(pct, 90), `${label} 完成`);
+                        }
+                    }
+                }
 
             } catch (error) {
-                if(fakeProgressInterval) clearInterval(fakeProgressInterval);
                 setProgress(0, '处理失败');
                 progressText.classList.remove('animate-pulse');
                 progressText.classList.add('text-red-500');
                 appendLog(error.message, 'error');
-                
+
+                downloadLink.classList.add('hidden');
                 resultActions.classList.remove('hidden');
-                downloadLink.classList.add('hidden'); // Hide download if failed
             } finally {
                 submitBtn.disabled = false;
                 submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
@@ -258,11 +311,13 @@
             document.getElementById('template-name').classList.remove('text-blue-500', 'font-medium');
             document.getElementById('content-name').textContent = '支持 .docx 格式，最大 10MB';
             document.getElementById('content-name').classList.remove('text-blue-500', 'font-medium');
-            
+
             setProgress(0, '正在准备上传...');
             progressText.classList.add('animate-pulse');
             progressText.classList.remove('text-green-600', 'text-red-500', 'font-bold');
             downloadLink.classList.remove('hidden');
+            logLink.classList.add('hidden');
+            logLink.href = '#';
         });
     </script>
 </body>

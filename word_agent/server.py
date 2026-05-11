@@ -178,6 +178,14 @@ async def convert(
             progress_queue.put({"step": step, **data})
 
         def run_agent():
+            log_path = Path(tmp_dir) / "convert.log"
+            file_handler = logging.FileHandler(log_path, encoding="utf-8")
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(logging.Formatter(
+                "%(asctime)s | %(levelname)s | %(name)s | %(message)s", datefmt="%H:%M:%S"
+            ))
+            wa_logger = logging.getLogger("word_agent")
+            wa_logger.addHandler(file_handler)
             try:
                 agent.run(
                     template_path=template_path,
@@ -188,18 +196,22 @@ async def convert(
                 global _daily_count
                 _daily_count += 1
                 with _store_lock:
-                    _file_store[file_id] = {"path": output_path, "tmp_dir": tmp_dir, "created_at": time.time()}
+                    _file_store[file_id] = {"path": output_path, "log_path": log_path, "tmp_dir": tmp_dir, "created_at": time.time()}
                 progress_queue.put({
                     "step": "done",
                     "file_id": file_id,
                     "download_url": f"/api/download/{file_id}",
+                    "log_url": f"/api/download-log/{file_id}",
                     "daily_remaining": DAILY_CONVERT_LIMIT - _daily_count,
                 })
             except Exception as e:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
                 logger.exception("转换失败")
-                progress_queue.put({"step": "error", "detail": str(e)})
+                with _store_lock:
+                    _file_store[file_id] = {"path": None, "log_path": log_path, "tmp_dir": tmp_dir, "created_at": time.time()}
+                progress_queue.put({"step": "error", "detail": str(e), "log_url": f"/api/download-log/{file_id}"})
             finally:
+                wa_logger.removeHandler(file_handler)
+                file_handler.close()
                 progress_queue.put(None)
                 _concurrent_sem.release()
 
@@ -232,6 +244,29 @@ async def download(file_id: str):
         path=str(entry["path"]),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         filename="converted.docx",
+    )
+
+
+@app.get("/api/download-log/{file_id}")
+async def download_log(file_id: str):
+    with _store_lock:
+        entry = _file_store.get(file_id)
+
+    if not entry:
+        return JSONResponse(status_code=404, content={"detail": "日志不存在或已过期"})
+
+    if time.time() - entry["created_at"] > FILE_TTL:
+        _remove_file(file_id)
+        return JSONResponse(status_code=410, content={"detail": "日志已过期"})
+
+    log_path = entry.get("log_path")
+    if not log_path or not log_path.exists():
+        return JSONResponse(status_code=404, content={"detail": "日志文件不存在"})
+
+    return FileResponse(
+        path=str(log_path),
+        media_type="text/plain; charset=utf-8",
+        filename=f"convert_{file_id[:8]}.log",
     )
 
 

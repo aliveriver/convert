@@ -182,7 +182,7 @@
             // UI Adjustments
             statusBox.classList.remove('hidden');
             resultActions.classList.add('hidden');
-            downloadLink.classList.remove('hidden');
+            downloadLink.classList.add('hidden');
             logLink.classList.add('hidden');
             submitBtn.disabled = true;
             submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
@@ -254,6 +254,7 @@
                         if (data.step === 'init') {
                             logLink.href = data.log_url;
                             logLink.classList.remove('hidden');
+                            resultActions.classList.remove('hidden');
                             continue;
                         }
 
@@ -271,6 +272,7 @@
                             progressText.classList.add('text-green-600', 'font-bold');
                             appendLog(`转换完成: File ID = ${data.file_id}`);
                             downloadLink.href = data.download_url;
+                            downloadLink.classList.remove('hidden');
                             if (data.log_url) {
                                 logLink.href = data.log_url;
                                 logLink.classList.remove('hidden');
@@ -326,7 +328,7 @@
             setProgress(0, '正在准备上传...');
             progressText.classList.add('animate-pulse');
             progressText.classList.remove('text-green-600', 'text-red-500', 'font-bold');
-            downloadLink.classList.remove('hidden');
+            downloadLink.classList.add('hidden');
             logLink.classList.add('hidden');
             logLink.href = '#';
         });

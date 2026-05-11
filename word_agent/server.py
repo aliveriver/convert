@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import tempfile
@@ -9,10 +10,11 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from queue import Queue
 
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -138,49 +140,72 @@ async def convert(
     if not _concurrent_sem.acquire(blocking=False):
         return JSONResponse(status_code=503, content={"detail": "服务器繁忙，请稍后再试"})
 
-    try:
-        for f, name in [(template, "template"), (content, "content")]:
-            if not f.filename or not f.filename.endswith(".docx"):
-                return JSONResponse(status_code=400, content={"detail": f"{name} 必须是 .docx 文件"})
+    for f, name in [(template, "template"), (content, "content")]:
+        if not f.filename or not f.filename.endswith(".docx"):
+            _concurrent_sem.release()
+            return JSONResponse(status_code=400, content={"detail": f"{name} 必须是 .docx 文件"})
 
-        tmp_dir = tempfile.mkdtemp(prefix="word_convert_")
-        try:
-            template_path = Path(tmp_dir) / "template.docx"
-            content_path = Path(tmp_dir) / "content.docx"
-            output_path = Path(tmp_dir) / "output.docx"
+    tmp_dir = tempfile.mkdtemp(prefix="word_convert_")
+    template_path = Path(tmp_dir) / "template.docx"
+    content_path = Path(tmp_dir) / "content.docx"
+    output_path = Path(tmp_dir) / "output.docx"
 
-            for upload, dest in [(template, template_path), (content, content_path)]:
-                data = await upload.read()
-                if len(data) > MAX_FILE_SIZE:
-                    return JSONResponse(
-                        status_code=413,
-                        content={"detail": f"文件 {upload.filename} 超过 10MB 限制"},
-                    )
-                dest.write_bytes(data)
-
-            logger.info("开始转换: template=%s content=%s", template.filename, content.filename)
-            agent.run(
-                template_path=template_path,
-                content_path=content_path,
-                output_path=output_path,
-            )
-
-            _daily_count += 1
-            file_id = uuid.uuid4().hex
-            with _store_lock:
-                _file_store[file_id] = {"path": output_path, "tmp_dir": tmp_dir, "created_at": time.time()}
-
-            return JSONResponse(content={
-                "file_id": file_id,
-                "download_url": f"/api/download/{file_id}",
-                "daily_remaining": DAILY_CONVERT_LIMIT - _daily_count,
-            })
-        except Exception as e:
+    for upload, dest in [(template, template_path), (content, content_path)]:
+        data = await upload.read()
+        if len(data) > MAX_FILE_SIZE:
+            _concurrent_sem.release()
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            logger.exception("转换失败")
-            return JSONResponse(status_code=500, content={"detail": f"转换失败: {str(e)}"})
-    finally:
-        _concurrent_sem.release()
+            return JSONResponse(
+                status_code=413,
+                content={"detail": f"文件 {upload.filename} 超过 10MB 限制"},
+            )
+        dest.write_bytes(data)
+
+    file_id = uuid.uuid4().hex
+
+    def event_stream():
+        progress_queue: Queue = Queue()
+
+        def progress_cb(step, data):
+            progress_queue.put({"step": step, **data})
+
+        def run_agent():
+            try:
+                agent.run(
+                    template_path=template_path,
+                    content_path=content_path,
+                    output_path=output_path,
+                    progress_callback=progress_cb,
+                )
+                global _daily_count
+                _daily_count += 1
+                with _store_lock:
+                    _file_store[file_id] = {"path": output_path, "tmp_dir": tmp_dir, "created_at": time.time()}
+                progress_queue.put({
+                    "step": "done",
+                    "file_id": file_id,
+                    "download_url": f"/api/download/{file_id}",
+                    "daily_remaining": DAILY_CONVERT_LIMIT - _daily_count,
+                })
+            except Exception as e:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                logger.exception("转换失败")
+                progress_queue.put({"step": "error", "detail": str(e)})
+            finally:
+                progress_queue.put(None)
+                _concurrent_sem.release()
+
+        worker = threading.Thread(target=run_agent, daemon=True)
+        worker.start()
+
+        while True:
+            msg = progress_queue.get()
+            if msg is None:
+                break
+            yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+
+    logger.info("开始转换(SSE): template=%s content=%s", template.filename, content.filename)
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/api/download/{file_id}")

@@ -108,6 +108,7 @@ class WordAgent:
         self.generation_prompt = read_prompt(generation_prompt_path)
         self.template_agent = TemplateDocumentAgent(llm, settings, format_prompt_path)
         self.content_agent = ContentDocumentAgent(llm, settings, content_prompt_path)
+        self._progress_callback = None
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -126,9 +127,10 @@ class WordAgent:
         graph.add_edge("write_docx", END)
         return graph.compile()
 
-    def run(self, template_path: Path, content_path: Path, output_path: Path) -> AgentState:
+    def run(self, template_path: Path, content_path: Path, output_path: Path, progress_callback=None) -> AgentState:
         """执行完整文档生成工作流。"""
 
+        self._progress_callback = progress_callback
         initial_state: AgentState = {
             "template_path": template_path,
             "content_path": content_path,
@@ -149,14 +151,21 @@ class WordAgent:
             },
         }
         logger.debug("LangGraph 运行配置: %s", runtime_config)
+        if progress_callback:
+            progress_callback("workflow", {"status": "started"})
         for chunk in self.graph.stream(initial_state, config=runtime_config, stream_mode="updates"):
             for node_name, update in chunk.items():
                 if not isinstance(update, dict):
                     logger.debug("节点 %s 返回非 dict 更新: %s", node_name, type(update).__name__)
                     continue
                 final_state.update(update)
+                elapsed = round(perf_counter() - start_time, 1)
                 logger.info("节点完成: %s，更新字段=%s", node_name, ", ".join(update.keys()))
-        logger.info("LangGraph 执行完成，耗时 %.2fs", perf_counter() - start_time)
+                if progress_callback:
+                    progress_callback(node_name, {"status": "completed", "elapsed": elapsed})
+        total_elapsed = round(perf_counter() - start_time, 1)
+        logger.info("LangGraph 执行完成，耗时 %.2fs", total_elapsed)
+        self._progress_callback = None
         return final_state
 
     def save_graph_debug(self, output_prefix: Path, include_png: bool = False) -> dict[str, Path]:
@@ -187,6 +196,8 @@ class WordAgent:
 
         start_time = perf_counter()
         logger.info("模板子 agent 开始分析: %s", state["template_path"])
+        if self._progress_callback:
+            self._progress_callback("analyze_template", {"status": "started"})
         result = self.template_agent.run(state["template_path"])
         block_count = result.get("template_block_count", 0)
         cache_hit = result.get("template_cache_hit", False)
@@ -203,6 +214,8 @@ class WordAgent:
 
         start_time = perf_counter()
         logger.info("内容子 agent 开始分析: %s", state["content_path"])
+        if self._progress_callback:
+            self._progress_callback("analyze_content", {"status": "started"})
         result = self.content_agent.run(state["content_path"])
         block_count = result.get("content_block_count", 0)
         item_count = len(result["content_structure"].items)
@@ -235,6 +248,9 @@ class WordAgent:
             self.settings.document.generation_max_workers,
         )
         logger.info("最终生成分块并发数=%s", max_workers)
+        total_chunks = len(item_chunks)
+        if self._progress_callback:
+            self._progress_callback("generate_document", {"status": "started", "total_chunks": total_chunks})
         generated_parts_by_index: list[GeneratedDocument | None] = [None] * len(item_chunks)
 
         def generate_chunk(
@@ -283,6 +299,8 @@ class WordAgent:
                 len(item_chunks),
                 len(generated_part.paragraphs),
             )
+            if self._progress_callback:
+                self._progress_callback("generate_chunk", {"current": chunk_index, "total": total_chunks})
             return chunk_index, generated_part
 
         if max_workers == 1:

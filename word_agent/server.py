@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 FILE_TTL = 600  # 生成文件保留 10 分钟
+DAILY_CONVERT_LIMIT = 100  # 全局每日转换上限
+MAX_CONCURRENT = 5  # 最大同时转换任务数
+MAX_STORAGE_BYTES = 1024 * 1024 * 1024 * 5  # 临时文件总量上限 5GB
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -42,6 +45,9 @@ app.state.limiter = limiter
 # 存储已生成文件的元信息: {file_id: {"path": Path, "created_at": float}}
 _file_store: dict[str, dict] = {}
 _store_lock = threading.Lock()
+_daily_count = 0
+_daily_reset_date = time.strftime("%Y-%m-%d")
+_concurrent_sem = threading.Semaphore(MAX_CONCURRENT)
 
 app.add_middleware(
     CORSMiddleware,
@@ -119,41 +125,62 @@ async def convert(
     template: UploadFile = File(..., description="模板 .docx 文件"),
     content: UploadFile = File(..., description="内容 .docx 文件"),
 ):
-    for f, name in [(template, "template"), (content, "content")]:
-        if not f.filename or not f.filename.endswith(".docx"):
-            return JSONResponse(status_code=400, content={"detail": f"{name} 必须是 .docx 文件"})
+    global _daily_count, _daily_reset_date
 
-    tmp_dir = tempfile.mkdtemp(prefix="word_convert_")
+    today = time.strftime("%Y-%m-%d")
+    if today != _daily_reset_date:
+        _daily_count = 0
+        _daily_reset_date = today
+
+    if _daily_count >= DAILY_CONVERT_LIMIT:
+        return JSONResponse(status_code=429, content={"detail": f"今日转换次数已达上限（{DAILY_CONVERT_LIMIT}次），请明天再试"})
+
+    if not _concurrent_sem.acquire(blocking=False):
+        return JSONResponse(status_code=503, content={"detail": "服务器繁忙，请稍后再试"})
+
     try:
-        template_path = Path(tmp_dir) / "template.docx"
-        content_path = Path(tmp_dir) / "content.docx"
-        output_path = Path(tmp_dir) / "output.docx"
+        for f, name in [(template, "template"), (content, "content")]:
+            if not f.filename or not f.filename.endswith(".docx"):
+                return JSONResponse(status_code=400, content={"detail": f"{name} 必须是 .docx 文件"})
 
-        for upload, dest in [(template, template_path), (content, content_path)]:
-            data = await upload.read()
-            if len(data) > MAX_FILE_SIZE:
-                return JSONResponse(
-                    status_code=413,
-                    content={"detail": f"文件 {upload.filename} 超过 10MB 限制"},
-                )
-            dest.write_bytes(data)
+        tmp_dir = tempfile.mkdtemp(prefix="word_convert_")
+        try:
+            template_path = Path(tmp_dir) / "template.docx"
+            content_path = Path(tmp_dir) / "content.docx"
+            output_path = Path(tmp_dir) / "output.docx"
 
-        logger.info("开始转换: template=%s content=%s", template.filename, content.filename)
-        agent.run(
-            template_path=template_path,
-            content_path=content_path,
-            output_path=output_path,
-        )
+            for upload, dest in [(template, template_path), (content, content_path)]:
+                data = await upload.read()
+                if len(data) > MAX_FILE_SIZE:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": f"文件 {upload.filename} 超过 10MB 限制"},
+                    )
+                dest.write_bytes(data)
 
-        file_id = uuid.uuid4().hex
-        with _store_lock:
-            _file_store[file_id] = {"path": output_path, "tmp_dir": tmp_dir, "created_at": time.time()}
+            logger.info("开始转换: template=%s content=%s", template.filename, content.filename)
+            agent.run(
+                template_path=template_path,
+                content_path=content_path,
+                output_path=output_path,
+            )
 
-        return JSONResponse(content={"file_id": file_id, "download_url": f"/api/download/{file_id}"})
-    except Exception as e:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        logger.exception("转换失败")
-        return JSONResponse(status_code=500, content={"detail": f"转换失败: {str(e)}"})
+            _daily_count += 1
+            file_id = uuid.uuid4().hex
+            with _store_lock:
+                _file_store[file_id] = {"path": output_path, "tmp_dir": tmp_dir, "created_at": time.time()}
+
+            return JSONResponse(content={
+                "file_id": file_id,
+                "download_url": f"/api/download/{file_id}",
+                "daily_remaining": DAILY_CONVERT_LIMIT - _daily_count,
+            })
+        except Exception as e:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            logger.exception("转换失败")
+            return JSONResponse(status_code=500, content={"detail": f"转换失败: {str(e)}"})
+    finally:
+        _concurrent_sem.release()
 
 
 @app.get("/api/download/{file_id}")

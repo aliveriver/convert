@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Word 文档对比</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .diff-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+        .diff-block {
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            margin-bottom: 0.5rem;
+            white-space: pre-wrap;
+            line-height: 1.6;
+            border: 1px solid #e5e7eb;
+        }
+
+        .diff-block mark {
+            background: #fde68a;
+            text-decoration: underline;
+            text-decoration-color: #d97706;
+            border-radius: 2px;
+            padding: 0 1px;
+        }
+        
+        .format-diff {
+            background-color: #fef2f2;
+            border-color: #fca5a5;
+        }
+        
+        .content-diff {
+            background-color: #fefce8;
+            border-color: #fde047;
+        }
+        
+        .equal-diff {
+            background-color: #f9fafb;
+            color: #374151;
+        }
+        
+        .format-badge {
+            display: block;
+            font-size: 0.75rem;
+            color: #ef4444;
+            margin-top: 0.5rem;
+            font-weight: 600;
+        }
+        
+        .diff-header {
+            font-weight: bold;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid #e5e7eb;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen text-gray-800">
+    <nav class="bg-white shadow-md py-4">
+        <div class="container mx-auto px-6 flex justify-between items-center">
+            <div>
+                <h1 class="text-2xl font-bold text-blue-600">Word 文档智能对比</h1>
+                <p class="text-sm text-gray-500">上传两份文档，高亮对比差异</p>
+            </div>
+            <div>
+                <a href="/frontend/index.html" class="text-blue-500 hover:underline text-sm font-medium">返回转换工具</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="container mx-auto px-6 py-8 flex flex-col items-center">
+        <!-- Upload Form -->
+        <div class="bg-white rounded-xl shadow-lg w-full max-w-4xl p-8 mb-8" id="upload-section">
+            <h2 class="text-xl font-bold mb-6 text-gray-700 border-b pb-2">提交对比文档</h2>
+            
+            <form id="compare-form" class="space-y-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- Doc1 -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">原始文档 (.docx)</label>
+                        <label for="doc1" class="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100 hover:border-blue-400 border-gray-300">
+                            <div class="flex flex-col items-center justify-center pt-5 pb-6">
+                                <p class="mb-2 text-sm text-gray-500"><span class="font-semibold">点击上传</span></p>
+                                <p class="text-xs text-center text-gray-500 px-2 name-display" id="doc1-name">原文档 / 基准文档</p>
+                            </div>
+                            <input id="doc1" type="file" accept=".docx" class="hidden" required />
+                        </label>
+                    </div>
+
+                    <!-- Doc2 -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">修改文档 (.docx)</label>
+                        <label for="doc2" class="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100 hover:border-blue-400 border-gray-300">
+                            <div class="flex flex-col items-center justify-center pt-5 pb-6">
+                                <p class="mb-2 text-sm text-gray-500"><span class="font-semibold">点击上传</span></p>
+                                <p class="text-xs text-center text-gray-500 px-2 name-display" id="doc2-name">目标文档 / 差异文档</p>
+                            </div>
+                            <input id="doc2" type="file" accept=".docx" class="hidden" required />
+                        </label>
+                    </div>
+                </div>
+
+                <div class="flex items-center justify-between">
+                    <div class="flex space-x-4 text-sm text-gray-600">
+                        <span class="flex items-center"><span class="w-3 h-3 bg-red-100 border border-red-300 inline-block mr-1 rounded"></span> 标红: 格式差异</span>
+                        <span class="flex items-center"><span class="w-3 h-3 bg-yellow-100 border border-yellow-300 inline-block mr-1 rounded"></span> 标黄: 内容差异</span>
+                    </div>
+                    <button type="submit" id="submit-btn" class="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-8 py-2.5 text-center transition-colors">
+                        开始对比
+                    </button>
+                </div>
+                
+                <div id="error-msg" class="text-red-500 text-sm hidden font-medium mt-2"></div>
+            </form>
+        </div>
+
+        <!-- Loading Indicator -->
+        <div id="loading" class="hidden my-12 flex flex-col items-center justify-center">
+            <svg class="animate-spin h-10 w-10 text-blue-600 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <p class="text-gray-600 text-sm font-medium">正在解析段落和格式...</p>
+        </div>
+
+        <!-- Result Container -->
+        <div id="result-section" class="bg-white rounded-xl shadow-lg w-full max-w-6xl p-8 hidden">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-xl font-bold text-gray-700">对比结果</h2>
+                <button id="reset-btn" class="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 text-sm font-semibold">重新上传</button>
+            </div>
+            
+            <div class="diff-container" id="diff-grid">
+                <div class="diff-header text-gray-600 text-lg">原始文档</div>
+                <div class="diff-header text-gray-600 text-lg">修改文档</div>
+                <!-- Dynamic Content Here -->
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const form = document.getElementById('compare-form');
+        const doc1Input = document.getElementById('doc1');
+        const doc2Input = document.getElementById('doc2');
+        const uploadSection = document.getElementById('upload-section');
+        const resultSection = document.getElementById('result-section');
+        const loading = document.getElementById('loading');
+        const diffGrid = document.getElementById('diff-grid');
+        const errorMsg = document.getElementById('error-msg');
+        const submitBtn = document.getElementById('submit-btn');
+
+        function handleFileDisplay(inputId, displayId) {
+            document.getElementById(inputId).addEventListener('change', function(e) {
+                if(e.target.files.length > 0) {
+                    document.getElementById(displayId).textContent = e.target.files[0].name;
+                    document.getElementById(displayId).classList.add('text-blue-500', 'font-medium');
+                }
+            });
+        }
+        handleFileDisplay('doc1', 'doc1-name');
+        handleFileDisplay('doc2', 'doc2-name');
+
+        function applyFormatStyle(el, fmt) {
+            if (!fmt) return;
+            if (fmt.font_name) el.style.fontFamily = `"${fmt.font_name}", serif`;
+            if (fmt.font_size_pt) {
+                el.style.fontSize = fmt.font_size_pt + 'pt';
+            } else {
+                el.style.fontSize = '12pt';
+            }
+            if (fmt.bold) el.style.fontWeight = 'bold';
+            if (fmt.italic) el.style.fontStyle = 'italic';
+            if (fmt.alignment) el.style.textAlign = fmt.alignment;
+            if (fmt.space_before_pt) el.style.marginTop = fmt.space_before_pt + 'pt';
+            if (fmt.space_after_pt) el.style.marginBottom = fmt.space_after_pt + 'pt';
+            if (fmt.first_line_indent_pt) el.style.textIndent = fmt.first_line_indent_pt + 'pt';
+            if (fmt.line_spacing) {
+                const ls = String(fmt.line_spacing);
+                if (ls.endsWith('pt')) {
+                    el.style.lineHeight = ls;
+                } else {
+                    el.style.lineHeight = fmt.line_spacing;
+                }
+            }
+        }
+
+        function appendBlock(item) {
+            const typeClass = item.type === 'equal' ? 'equal-diff'
+                            : item.type === 'format_diff' ? 'format-diff'
+                            : 'content-diff';
+
+            const block1 = document.createElement('div');
+            block1.className = `diff-block ${typeClass}`;
+            applyFormatStyle(block1, item.format1);
+
+            const block2 = document.createElement('div');
+            block2.className = `diff-block ${typeClass}`;
+            applyFormatStyle(block2, item.format2);
+
+            if (item.type === 'content_diff' && item.html1 !== undefined) {
+                block1.innerHTML = item.html1 || '<em style="color:#9ca3af">(空白 / 缺少内容)</em>';
+                block2.innerHTML = item.html2 || '<em style="color:#9ca3af">(空白 / 缺少内容)</em>';
+            } else {
+                block1.textContent = item.text1 || '(空白 / 缺少内容)';
+                block2.textContent = item.text2 || '(空白 / 缺少内容)';
+            }
+
+            if (item.format_changes && item.format_changes.length > 0) {
+                const badge = document.createElement('span');
+                badge.className = 'format-badge';
+                const parts = item.format_changes.map(c => `${c.label}: ${c.from ?? '无'} → ${c.to ?? '无'}`);
+                badge.textContent = parts.join('；');
+                block2.appendChild(badge);
+            }
+
+            diffGrid.appendChild(block1);
+            diffGrid.appendChild(block2);
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            errorMsg.classList.add('hidden');
+            
+            if (!doc1Input.files[0] || !doc2Input.files[0]) {
+                return;
+            }
+
+            uploadSection.classList.add('opacity-50', 'pointer-events-none');
+            submitBtn.disabled = true;
+            loading.classList.remove('hidden');
+
+            const formData = new FormData();
+            formData.append('doc1', doc1Input.files[0]);
+            formData.append('doc2', doc2Input.files[0]);
+
+            try {
+                const res = await fetch('/api/compare', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || '请求失败，请检查服务');
+                }
+
+                const data = await res.json();
+                
+                // Clear grid except headers
+                while (diffGrid.children.length > 2) {
+                    diffGrid.removeChild(diffGrid.lastChild);
+                }
+
+                data.comparison.forEach(item => {
+                    appendBlock(item);
+                });
+
+                uploadSection.classList.add('hidden');
+                resultSection.classList.remove('hidden');
+
+            } catch (error) {
+                errorMsg.textContent = error.message;
+                errorMsg.classList.remove('hidden');
+            } finally {
+                uploadSection.classList.remove('opacity-50', 'pointer-events-none');
+                submitBtn.disabled = false;
+                loading.classList.add('hidden');
+            }
+        });
+
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            uploadSection.classList.remove('hidden');
+            resultSection.classList.add('hidden');
+            form.reset();
+            document.getElementById('doc1-name').textContent = '原文档 / 基准文档';
+            document.getElementById('doc2-name').textContent = '目标文档 / 差异文档';
+            document.getElementById('doc1-name').classList.remove('text-blue-500', 'font-medium');
+            document.getElementById('doc2-name').classList.remove('text-blue-500', 'font-medium');
+        });
+    </script>
+</body>
+</html>

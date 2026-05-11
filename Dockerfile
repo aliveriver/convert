@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY config/ config/
 COPY prompts/ prompts/
 COPY word_agent/ word_agent/
+COPY frontend/ frontend/
 
 RUN mkdir -p out/cache
 

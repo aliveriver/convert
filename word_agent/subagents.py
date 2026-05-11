@@ -6,6 +6,7 @@ ContentDocumentAgent 会把内容全文和弱格式证据交给 LLM，使其在�
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 from pathlib import Path
@@ -21,6 +22,14 @@ from word_agent.llm import message_content_to_text, parse_content_structure_with
 from word_agent.models import ContentStructure, ContentStructureItem
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_count(task_count: int, configured_workers: int) -> int:
+    """Return a safe worker count; set config to 1 to force serial execution."""
+
+    if task_count <= 1:
+        return 1
+    return min(max(configured_workers, 1), task_count)
 
 
 def _chunk_blocks(
@@ -262,9 +271,16 @@ class ContentDocumentAgent:
             }
 
         start_time = perf_counter()
-        structures: list[ContentStructure] = []
-        logger.info("调用 LLM 分块判断内容结构")
-        for chunk_index, chunk in enumerate(chunks, start=1):
+        max_workers = _worker_count(
+            len(chunks),
+            self.settings.document.content_analysis_max_workers,
+        )
+        structures_by_index: list[ContentStructure | None] = [None] * len(chunks)
+        logger.info("调用 LLM 分块判断内容结构，并发数=%s", max_workers)
+
+        def analyze_chunk(chunk_index: int, chunk: list[dict[str, object]]) -> tuple[int, ContentStructure]:
+            """Analyze one content chunk and return its original chunk index."""
+
             chunk_payload = _compact_content_profile(profile, chunk, chunk_index, len(chunks))
             response = self.llm.invoke(
                 [
@@ -281,7 +297,6 @@ class ContentDocumentAgent:
             )
             content_analysis = message_content_to_text(response)
             structure = parse_content_structure_with_repair(self.llm, content_analysis)
-            structures.append(structure)
             logger.info(
                 "内容结构分块完成 %s/%s，源块=%s，结构项=%s",
                 chunk_index,
@@ -289,7 +304,23 @@ class ContentDocumentAgent:
                 len(chunk),
                 len(structure.items),
             )
+            return chunk_index, structure
 
+        if max_workers == 1:
+            for chunk_index, chunk in enumerate(chunks, start=1):
+                result_index, structure = analyze_chunk(chunk_index, chunk)
+                structures_by_index[result_index - 1] = structure
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="content-analysis") as executor:
+                futures = [
+                    executor.submit(analyze_chunk, chunk_index, chunk)
+                    for chunk_index, chunk in enumerate(chunks, start=1)
+                ]
+                for future in as_completed(futures):
+                    result_index, structure = future.result()
+                    structures_by_index[result_index - 1] = structure
+
+        structures = [structure for structure in structures_by_index if structure is not None]
         content_structure = _merge_content_structures(structures)
         logger.info(
             "内容结构合并完成，结构项=%s，必须保留事实=%s，耗时 %.2fs",

@@ -40,7 +40,9 @@ class DocumentSettings:
     content_block_text_limit: int
     content_analysis_chunk_size: int
     content_analysis_chunk_overlap: int
+    content_analysis_max_workers: int
     generation_chunk_size: int
+    generation_max_workers: int
     template_cache_enabled: bool
     template_cache_dir: Path
     default_paragraph_style: str
@@ -129,7 +131,9 @@ def load_settings(config_path: Path = Path("config/settings.yaml")) -> AppSettin
         content_block_text_limit=int(data["document"].get("content_block_text_limit", 0)),
         content_analysis_chunk_size=int(data["document"].get("content_analysis_chunk_size", 32)),
         content_analysis_chunk_overlap=int(data["document"].get("content_analysis_chunk_overlap", 3)),
+        content_analysis_max_workers=int(data["document"].get("content_analysis_max_workers", 2)),
         generation_chunk_size=int(data["document"].get("generation_chunk_size", 24)),
+        generation_max_workers=int(data["document"].get("generation_max_workers", 2)),
         template_cache_enabled=_to_bool(data["document"].get("template_cache_enabled", True)),
         template_cache_dir=Path(data["document"].get("template_cache_dir", "out/cache")),
         default_paragraph_style=data["document"].get("default_paragraph_style", "Normal"),

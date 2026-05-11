@@ -22,7 +22,9 @@ document:
   # 分块只限制单次 LLM 输入，不限制 DOCX 全文提取。
   content_analysis_chunk_size: 32
   content_analysis_chunk_overlap: 3
+  content_analysis_max_workers: 2
   generation_chunk_size: 24
+  generation_max_workers: 2
   # 模板通常反复复用，缓存可跳过最耗时的模板 LLM 分析。
   template_cache_enabled: true
   template_cache_dir: out/cache

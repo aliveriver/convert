@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 from time import perf_counter
@@ -28,6 +29,14 @@ from word_agent.models import AgentState, ContentStructureItem, GeneratedDocumen
 from word_agent.subagents import ContentDocumentAgent, TemplateDocumentAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_count(task_count: int, configured_workers: int) -> int:
+    """Return a safe worker count; set config to 1 to force serial execution."""
+
+    if task_count <= 1:
+        return 1
+    return min(max(configured_workers, 1), task_count)
 
 
 def _chunk_items(
@@ -221,8 +230,19 @@ class WordAgent:
             len(content_items),
             len(item_chunks),
         )
-        generated_parts: list[GeneratedDocument] = []
-        for chunk_index, item_chunk in enumerate(item_chunks, start=1):
+        max_workers = _worker_count(
+            len(item_chunks),
+            self.settings.document.generation_max_workers,
+        )
+        logger.info("最终生成分块并发数=%s", max_workers)
+        generated_parts_by_index: list[GeneratedDocument | None] = [None] * len(item_chunks)
+
+        def generate_chunk(
+            chunk_index: int,
+            item_chunk: list[ContentStructureItem],
+        ) -> tuple[int, GeneratedDocument]:
+            """Generate one document chunk and return its original chunk index."""
+
             chunk_payload = {
                 "document_title": content_structure.title,
                 "chunk_index": chunk_index,
@@ -257,14 +277,29 @@ class WordAgent:
                 debug_path.write_text(raw_response, encoding="utf-8")
                 logger.exception("最终生成分块 JSON 解析和修复均失败，原始响应已保存: %s", debug_path)
                 raise
-            generated_parts.append(generated_part)
             logger.info(
                 "最终生成分块完成 %s/%s，段落数=%s",
                 chunk_index,
                 len(item_chunks),
                 len(generated_part.paragraphs),
             )
+            return chunk_index, generated_part
 
+        if max_workers == 1:
+            for chunk_index, item_chunk in enumerate(item_chunks, start=1):
+                result_index, generated_part = generate_chunk(chunk_index, item_chunk)
+                generated_parts_by_index[result_index - 1] = generated_part
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="document-generation") as executor:
+                futures = [
+                    executor.submit(generate_chunk, chunk_index, item_chunk)
+                    for chunk_index, item_chunk in enumerate(item_chunks, start=1)
+                ]
+                for future in as_completed(futures):
+                    result_index, generated_part = future.result()
+                    generated_parts_by_index[result_index - 1] = generated_part
+
+        generated_parts = [part for part in generated_parts_by_index if part is not None]
         generated_document = _merge_generated_documents(content_structure.title, generated_parts)
         logger.info(
             "最终生成完成，标题=%s，段落数=%s，耗时 %.2fs",

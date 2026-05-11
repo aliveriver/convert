@@ -170,6 +170,11 @@ async def convert(
         dest.write_bytes(data)
 
     file_id = uuid.uuid4().hex
+    log_path = Path(tmp_dir) / "convert.log"
+    log_path.touch()
+
+    with _store_lock:
+        _file_store[file_id] = {"path": None, "log_path": log_path, "tmp_dir": tmp_dir, "created_at": time.time()}
 
     def event_stream():
         progress_queue: Queue = Queue()
@@ -178,7 +183,6 @@ async def convert(
             progress_queue.put({"step": step, **data})
 
         def run_agent():
-            log_path = Path(tmp_dir) / "convert.log"
             file_handler = logging.FileHandler(log_path, encoding="utf-8")
             file_handler.setLevel(logging.DEBUG)
             file_handler.setFormatter(logging.Formatter(
@@ -196,7 +200,8 @@ async def convert(
                 global _daily_count
                 _daily_count += 1
                 with _store_lock:
-                    _file_store[file_id] = {"path": output_path, "log_path": log_path, "tmp_dir": tmp_dir, "created_at": time.time()}
+                    _file_store[file_id]["path"] = output_path
+                    _file_store[file_id]["created_at"] = time.time()
                 progress_queue.put({
                     "step": "done",
                     "file_id": file_id,
@@ -206,8 +211,6 @@ async def convert(
                 })
             except Exception as e:
                 logger.exception("转换失败")
-                with _store_lock:
-                    _file_store[file_id] = {"path": None, "log_path": log_path, "tmp_dir": tmp_dir, "created_at": time.time()}
                 progress_queue.put({"step": "error", "detail": str(e), "log_url": f"/api/download-log/{file_id}"})
             finally:
                 wa_logger.removeHandler(file_handler)
@@ -245,6 +248,9 @@ async def download(file_id: str):
     if time.time() - entry["created_at"] > FILE_TTL:
         _remove_file(file_id)
         return JSONResponse(status_code=410, content={"detail": "文件已过期，请重新转换"})
+
+    if not entry["path"] or not Path(entry["path"]).exists():
+        return JSONResponse(status_code=404, content={"detail": "转换尚未完成或已失败"})
 
     return FileResponse(
         path=str(entry["path"]),

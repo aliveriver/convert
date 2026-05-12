@@ -274,3 +274,125 @@ def get_doc_diff(file1_path, file2_path):
             diff_results.append(item)
 
     return diff_results
+
+
+# ─── 多格式通用对比 ───────────────────────────────────────────────────────────
+
+SEMANTIC_KEYS = ["element_type", "heading_level", "list_type"]
+
+LABEL_MAP_SEMANTIC = {
+    "element_type": "元素类型",
+    "heading_level": "标题级别",
+    "list_type": "列表类型",
+}
+
+
+def _compare_format_extended(fmt1: dict, fmt2: dict) -> list[dict]:
+    """对比两个扩展格式字典，支持跨格式对比。"""
+    changes = []
+
+    for k in COMPARE_KEYS:
+        v1 = fmt1.get(k)
+        v2 = fmt2.get(k)
+        if v1 is None and v2 is None:
+            continue
+        if v1 != v2:
+            d1 = _display_value(k, v1, fmt1)
+            d2 = _display_value(k, v2, fmt2)
+            if d1 != d2:
+                changes.append({"key": k, "label": LABEL_MAP.get(k, k), "from": d1, "to": d2})
+
+    sem1 = fmt1.get("semantic") or {}
+    sem2 = fmt2.get("semantic") or {}
+    for sk in SEMANTIC_KEYS:
+        sv1 = sem1.get(sk)
+        sv2 = sem2.get(sk)
+        if sv1 is None and sv2 is None:
+            continue
+        if sv1 != sv2:
+            changes.append({
+                "key": f"semantic.{sk}",
+                "label": LABEL_MAP_SEMANTIC.get(sk, sk),
+                "from": sv1,
+                "to": sv2,
+            })
+
+    return changes
+
+
+def _display_value(key: str, value, fmt: dict):
+    """格式化显示值：有具体值显示值，无值时尝试从语义信息补充。"""
+    if value is not None:
+        return value
+    sem = fmt.get("semantic") or {}
+    if key == "bold" and sem.get("element_type") == "heading":
+        return "标题(隐含加粗)"
+    if key == "font_size_pt" and sem.get("heading_level"):
+        return f"标题级别{sem['heading_level']}(语义)"
+    return None
+
+
+def get_doc_diff_universal(file1_path, file2_path) -> list[dict]:
+    """通用多格式文档对比入口。"""
+    from pathlib import Path
+    from word_agent.parsers import get_parser
+
+    p1 = Path(file1_path)
+    p2 = Path(file2_path)
+
+    parser1 = get_parser(p1)
+    parser2 = get_parser(p2)
+
+    paras1 = parser1.parse(p1)
+    paras2 = parser2.parse(p2)
+
+    texts1 = [p.text for p in paras1]
+    texts2 = [p.text for p in paras2]
+
+    matcher = difflib.SequenceMatcher(None, texts1, texts2)
+    opcodes = matcher.get_opcodes()
+
+    diff_results = []
+
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            for i, j in zip(range(i1, i2), range(j1, j2)):
+                fmt1 = paras1[i].format
+                fmt2 = paras2[j].format
+                changes = _compare_format_extended(fmt1, fmt2)
+
+                item = {
+                    "text1": texts1[i],
+                    "text2": texts2[j],
+                    "format1": fmt1,
+                    "format2": fmt2,
+                }
+                if changes:
+                    item["type"] = "format_diff"
+                    item["format_changes"] = changes
+                else:
+                    item["type"] = "equal"
+                diff_results.append(item)
+        elif tag in ("replace", "delete", "insert"):
+            text1 = "\n".join(texts1[i1:i2])
+            text2 = "\n".join(texts2[j1:j2])
+            html1, html2 = _char_diff_html(text1, text2)
+            fmt1 = paras1[i1].format if i1 < i2 else {}
+            fmt2 = paras2[j1].format if j1 < j2 else {}
+            format_changes = _compare_format_extended(fmt1, fmt2) if fmt1 and fmt2 else []
+            item_type = "both_diff" if format_changes else "content_diff"
+            item = {
+                "type": item_type,
+                "tag": tag,
+                "text1": text1,
+                "text2": text2,
+                "html1": html1,
+                "html2": html2,
+                "format1": fmt1,
+                "format2": fmt2,
+            }
+            if format_changes:
+                item["format_changes"] = format_changes
+            diff_results.append(item)
+
+    return diff_results

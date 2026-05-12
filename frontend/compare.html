@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Word 文档对比</title>
+    <title>文档智能对比</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         .diff-container {
@@ -70,8 +70,8 @@
     <nav class="bg-white shadow-md py-4">
         <div class="container mx-auto px-6 flex justify-between items-center">
             <div>
-                <h1 class="text-2xl font-bold text-blue-600">Word 文档智能对比</h1>
-                <p class="text-sm text-gray-500">上传两份文档，高亮对比差异</p>
+                <h1 class="text-2xl font-bold text-blue-600">文档智能对比</h1>
+                <p class="text-sm text-gray-500">上传两份文档，高亮对比差异（支持 .docx .md .html .tex）</p>
             </div>
             <div class="flex items-center space-x-4">
                 <a href="/frontend/index.html" class="text-blue-500 hover:underline text-sm font-medium">← 返回转换工具</a>
@@ -93,25 +93,25 @@
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <!-- Doc1 -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">原始文档 (.docx)</label>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">原始文档</label>
                         <label for="doc1" class="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100 hover:border-blue-400 border-gray-300">
                             <div class="flex flex-col items-center justify-center pt-5 pb-6">
                                 <p class="mb-2 text-sm text-gray-500"><span class="font-semibold">点击上传</span></p>
                                 <p class="text-xs text-center text-gray-500 px-2 name-display" id="doc1-name">原文档 / 基准文档</p>
                             </div>
-                            <input id="doc1" type="file" accept=".docx" class="hidden" required />
+                            <input id="doc1" type="file" accept=".docx,.md,.markdown,.html,.htm,.tex" class="hidden" required />
                         </label>
                     </div>
 
                     <!-- Doc2 -->
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">修改文档 (.docx)</label>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">修改文档</label>
                         <label for="doc2" class="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100 hover:border-blue-400 border-gray-300">
                             <div class="flex flex-col items-center justify-center pt-5 pb-6">
                                 <p class="mb-2 text-sm text-gray-500"><span class="font-semibold">点击上传</span></p>
                                 <p class="text-xs text-center text-gray-500 px-2 name-display" id="doc2-name">目标文档 / 差异文档</p>
                             </div>
-                            <input id="doc2" type="file" accept=".docx" class="hidden" required />
+                            <input id="doc2" type="file" accept=".docx,.md,.markdown,.html,.htm,.tex" class="hidden" required />
                         </label>
                     </div>
                 </div>
@@ -188,6 +188,9 @@
             if (fmt.font_name) el.style.fontFamily = `"${fmt.font_name}", serif`;
             if (fmt.font_size_pt) {
                 el.style.fontSize = fmt.font_size_pt + 'pt';
+            } else if (fmt.semantic && fmt.semantic.heading_level) {
+                const sizes = {1: '24pt', 2: '18pt', 3: '14pt', 4: '12pt', 5: '10pt', 6: '10pt'};
+                el.style.fontSize = sizes[fmt.semantic.heading_level] || '12pt';
             } else {
                 el.style.fontSize = '12pt';
             }
@@ -204,6 +207,23 @@
                 } else {
                     el.style.lineHeight = fmt.line_spacing;
                 }
+            }
+            if (fmt.semantic && fmt.semantic.code) {
+                el.style.fontFamily = '"Courier New", monospace';
+                el.style.backgroundColor = '#f3f4f6';
+                el.style.padding = '4px 8px';
+                el.style.borderRadius = '4px';
+            }
+            if (fmt.semantic && fmt.semantic.element_type === 'blockquote') {
+                el.style.borderLeft = '3px solid #d1d5db';
+                el.style.paddingLeft = '12px';
+                el.style.color = '#6b7280';
+            }
+            if (fmt.source_type && fmt.source_type !== 'docx') {
+                const tag = document.createElement('span');
+                tag.className = 'text-xs text-gray-400 ml-2';
+                tag.textContent = `[${fmt.source_type}]`;
+                el.appendChild(tag);
             }
         }
 

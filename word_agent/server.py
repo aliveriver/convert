@@ -24,7 +24,7 @@ from word_agent.config import load_settings
 from word_agent.graph import WordAgent
 from word_agent.llm import build_chat_model
 from word_agent.observability import configure_langsmith
-from word_agent.compare_util import get_doc_diff
+from word_agent.compare_util import get_doc_diff, get_doc_diff_universal
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -101,24 +101,34 @@ async def health():
     logger.debug("健康检查: active_tasks=%d, daily_count=%d", active_tasks, _daily_count)
     return {"status": "ok", "active_tasks": active_tasks, "daily_count": _daily_count}
 
+SUPPORTED_COMPARE_EXTS = {".docx", ".md", ".markdown", ".html", ".htm", ".tex"}
+
+
 @app.post("/api/compare")
 @limiter.limit("5/minute")
 async def compare_docs(
     request: Request,
-    doc1: UploadFile = File(..., description="First .docx file"),
-    doc2: UploadFile = File(..., description="Second .docx file"),
+    doc1: UploadFile = File(..., description="First document file"),
+    doc2: UploadFile = File(..., description="Second document file"),
 ):
     for f, name in [(doc1, "doc1"), (doc2, "doc2")]:
-        if not f.filename or not f.filename.endswith(".docx"):
-            logger.warning("对比请求参数错误: %s 文件名=%s", name, f.filename)
-            return JSONResponse(status_code=400, content={"detail": f"{name} 必须是 .docx 文件"})
+        if not f.filename:
+            return JSONResponse(status_code=400, content={"detail": f"{name} 文件名为空"})
+        ext = Path(f.filename).suffix.lower()
+        if ext not in SUPPORTED_COMPARE_EXTS:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": f"{name} 不支持的格式 '{ext}'，支持: {', '.join(sorted(SUPPORTED_COMPARE_EXTS))}"},
+            )
 
     tmp_dir = tempfile.mkdtemp(prefix="word_compare_")
     logger.info("对比请求: doc1=%s(%d bytes) doc2=%s(%d bytes) tmp=%s",
                 doc1.filename, doc1.size or 0, doc2.filename, doc2.size or 0, tmp_dir)
     try:
-        p1 = Path(tmp_dir) / "doc1.docx"
-        p2 = Path(tmp_dir) / "doc2.docx"
+        ext1 = Path(doc1.filename).suffix.lower()
+        ext2 = Path(doc2.filename).suffix.lower()
+        p1 = Path(tmp_dir) / f"doc1{ext1}"
+        p2 = Path(tmp_dir) / f"doc2{ext2}"
 
         for upload, dest in [(doc1, p1), (doc2, p2)]:
             data = await upload.read()
@@ -130,7 +140,7 @@ async def compare_docs(
             dest.write_bytes(data)
 
         logger.info("开始对比: doc1=%s doc2=%s", doc1.filename, doc2.filename)
-        diff_results = get_doc_diff(p1, p2)
+        diff_results = get_doc_diff_universal(p1, p2)
         logger.info("对比完成: doc1=%s doc2=%s, 差异数=%d", doc1.filename, doc2.filename, len(diff_results) if isinstance(diff_results, list) else 0)
 
         return JSONResponse(content={"comparison": diff_results})

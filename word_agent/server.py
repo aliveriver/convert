@@ -23,6 +23,7 @@ from slowapi.util import get_remote_address
 from word_agent.config import load_settings
 from word_agent.graph import WordAgent
 from word_agent.llm import build_chat_model
+from word_agent.models import SUPPORTED_INPUT_EXTENSIONS, SUPPORTED_OUTPUT_EXTENSIONS
 from word_agent.observability import configure_langsmith
 from word_agent.compare_util import get_doc_diff, get_doc_diff_universal
 
@@ -155,8 +156,9 @@ async def compare_docs(
 @limiter.limit("3/minute")
 async def convert(
     request: Request,
-    template: UploadFile = File(..., description="模板 .docx 文件"),
-    content: UploadFile = File(..., description="内容 .docx 文件"),
+    template: UploadFile = File(..., description="模板文件 (.docx/.tex/.md)"),
+    content: UploadFile = File(..., description="内容文件 (.docx/.tex/.md)"),
+    output_format: str | None = None,
 ):
     global _daily_count, _daily_reset_date
 
@@ -175,17 +177,39 @@ async def convert(
         return JSONResponse(status_code=503, content={"detail": "服务器繁忙，请稍后再试"})
 
     for f, name in [(template, "template"), (content, "content")]:
-        if not f.filename or not f.filename.endswith(".docx"):
-            logger.warning("转换请求参数错误: %s 文件名=%s", name, f.filename)
+        if not f.filename:
+            logger.warning("转换请求参数错误: %s 文件名为空", name)
             _concurrent_sem.release()
-            return JSONResponse(status_code=400, content={"detail": f"{name} 必须是 .docx 文件"})
+            return JSONResponse(status_code=400, content={"detail": f"{name} 文件名为空"})
+        ext = Path(f.filename).suffix.lower()
+        if ext not in SUPPORTED_INPUT_EXTENSIONS:
+            logger.warning("转换请求参数错误: %s 格式不支持=%s", name, ext)
+            _concurrent_sem.release()
+            return JSONResponse(
+                status_code=400,
+                content={"detail": f"{name} 不支持的格式 '{ext}'，支持: {', '.join(sorted(SUPPORTED_INPUT_EXTENSIONS))}"},
+            )
+
+    template_ext = Path(template.filename).suffix.lower()
+    if output_format:
+        out_ext = output_format if output_format.startswith(".") else f".{output_format}"
+    else:
+        out_ext = template_ext if template_ext in SUPPORTED_OUTPUT_EXTENSIONS else ".docx"
+
+    if out_ext not in SUPPORTED_OUTPUT_EXTENSIONS:
+        _concurrent_sem.release()
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"不支持的输出格式 '{out_ext}'，支持: {', '.join(sorted(SUPPORTED_OUTPUT_EXTENSIONS))}"},
+        )
 
     tmp_dir = tempfile.mkdtemp(prefix="word_convert_")
-    template_path = Path(tmp_dir) / "template.docx"
-    content_path = Path(tmp_dir) / "content.docx"
-    output_path = Path(tmp_dir) / "output.docx"
-    logger.info("转换请求接收: template=%s content=%s file_id待分配 tmp=%s",
-                template.filename, content.filename, tmp_dir)
+    template_path = Path(tmp_dir) / f"template{template_ext}"
+    content_ext = Path(content.filename).suffix.lower()
+    content_path = Path(tmp_dir) / f"content{content_ext}"
+    output_path = Path(tmp_dir) / f"output{out_ext}"
+    logger.info("转换请求接收: template=%s content=%s output_format=%s tmp=%s",
+                template.filename, content.filename, out_ext, tmp_dir)
 
     for upload, dest in [(template, template_path), (content, content_path)]:
         data = await upload.read()
@@ -309,11 +333,21 @@ async def download(file_id: str):
         logger.warning("下载请求: file_id=%s 文件不存在(path=%s)", file_id[:8], entry["path"])
         return JSONResponse(status_code=404, content={"detail": "转换尚未完成或已失败"})
 
+    output_file = Path(entry["path"])
+    ext = output_file.suffix.lower()
+    media_types = {
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".tex": "application/x-tex",
+        ".md": "text/markdown",
+    }
+    media_type = media_types.get(ext, "application/octet-stream")
+    filename = f"converted{ext}"
+
     logger.info("下载成功: file_id=%s path=%s", file_id[:8], entry["path"])
     return FileResponse(
         path=str(entry["path"]),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename="converted.docx",
+        media_type=media_type,
+        filename=filename,
     )
 
 

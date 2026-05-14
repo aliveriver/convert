@@ -7,11 +7,16 @@ openai:
   api_key: ${OPENAI_API_KEY}
   base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
   model: ${OPENAI_MODEL:-gpt-4o-mini}
+  # 可为不同阶段指定不同模型；留空则使用上面的 model。
+  content_analysis_model: ${OPENAI_CONTENT_ANALYSIS_MODEL:-}
+  generation_model: ${OPENAI_GENERATION_MODEL:-}
 
 anthropic:
   api_key: ${ANTHROPIC_API_KEY}
   base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
   model: ${ANTHROPIC_MODEL:-claude-3-5-sonnet-latest}
+  content_analysis_model: ${ANTHROPIC_CONTENT_ANALYSIS_MODEL:-}
+  generation_model: ${ANTHROPIC_GENERATION_MODEL:-}
 
 document:
   # 0 表示不截断；LLM 会收到所有提取文本。
@@ -20,11 +25,11 @@ document:
   max_content_blocks: 0
   content_block_text_limit: 0
   # 分块只限制单次 LLM 输入，不限制 DOCX 全文提取。
-  content_analysis_chunk_size: 32
-  content_analysis_chunk_overlap: 3
-  content_analysis_max_workers: 2
-  generation_chunk_size: 24
-  generation_max_workers: 2
+  content_analysis_chunk_size: 64
+  content_analysis_chunk_overlap: 4
+  content_analysis_max_workers: 4
+  generation_chunk_size: 48
+  generation_max_workers: 4
   # 模板通常反复复用，缓存可跳过最耗时的模板 LLM 分析。
   template_cache_enabled: true
   template_cache_dir: out/cache

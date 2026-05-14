@@ -1,7 +1,7 @@
-"""用于独立分析 Word 文档的专用子 agent。
+"""用于独立分析文档的专用子 agent。
 
 TemplateDocumentAgent 会把模板全文和样式画像交给 LLM。
-ContentDocumentAgent 会把内容全文和弱格式证据交给 LLM，使其在不依赖 Word 样式的情况下恢复结构。
+ContentDocumentAgent 会把内容全文和弱格式证据交给 LLM，使其在不依赖原文档样式的情况下恢复结构。
 """
 
 from __future__ import annotations
@@ -17,9 +17,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from word_agent.cache import TemplateAnalysisCache
 from word_agent.config import AppSettings, read_prompt
-from word_agent.docx_io import extract_content_profile, extract_template_profile
+from word_agent.extract import extract_content, extract_template
 from word_agent.llm import message_content_to_text, parse_content_structure_with_repair
 from word_agent.models import ContentStructure, ContentStructureItem
+from word_agent.pre_classify import split_by_confidence
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,7 @@ class TemplateDocumentAgent:
                 "template_cache_hit": True,
             }
 
-        profile = extract_template_profile(
+        profile = extract_template(
             template_path,
             self.settings.document.max_template_chars,
         )
@@ -241,7 +242,7 @@ class ContentDocumentAgent:
     def run(self, content_path: Path) -> dict[str, object]:
         """Return a merged structure analysis while keeping each LLM input bounded."""
 
-        profile = extract_content_profile(
+        profile = extract_content(
             content_path,
             self.settings.document.max_content_chars,
             self.settings.document.max_content_blocks,
@@ -250,8 +251,17 @@ class ContentDocumentAgent:
         blocks = profile.get("blocks", [])
         if not isinstance(blocks, list):
             blocks = []
+
+        pre_classified, uncertain_blocks = split_by_confidence(blocks)
+        logger.info(
+            "规则预分类完成，已确定=%s，需LLM=%s（节省 %.0f%%）",
+            len(pre_classified),
+            len(uncertain_blocks),
+            (len(pre_classified) / max(len(blocks), 1)) * 100,
+        )
+
         chunks = _chunk_blocks(
-            blocks,
+            uncertain_blocks,
             self.settings.document.content_analysis_chunk_size,
             self.settings.document.content_analysis_chunk_overlap,
         )
@@ -261,7 +271,7 @@ class ContentDocumentAgent:
             len(profile.get("tables", [])),
             len(chunks),
         )
-        if not chunks:
+        if not chunks and not pre_classified:
             return {
                 "content_profile": _compact_profile_for_state(profile),
                 "content_analysis": "内容文档未提取到可见文本块。",
@@ -271,57 +281,65 @@ class ContentDocumentAgent:
             }
 
         start_time = perf_counter()
-        max_workers = _worker_count(
-            len(chunks),
-            self.settings.document.content_analysis_max_workers,
-        )
-        structures_by_index: list[ContentStructure | None] = [None] * len(chunks)
-        logger.info("调用 LLM 分块判断内容结构，并发数=%s", max_workers)
+        structures: list[ContentStructure] = []
 
-        def analyze_chunk(chunk_index: int, chunk: list[dict[str, object]]) -> tuple[int, ContentStructure]:
-            """Analyze one content chunk and return its original chunk index."""
-
-            chunk_payload = _compact_content_profile(profile, chunk, chunk_index, len(chunks))
-            response = self.llm.invoke(
-                [
-                    SystemMessage(content=self.prompt),
-                    HumanMessage(
-                        content=(
-                            "下面是用户 Word 内容的一个连续分块。全文会被分块完整处理；"
-                            "请只分析当前分块中的 blocks，保留原始 source_index，"
-                            "不要因为没有看到全文其他部分而改写或补造事实。\n"
-                            f"{json.dumps(chunk_payload, ensure_ascii=False, indent=2)}"
-                        )
-                    ),
-                ]
-            )
-            content_analysis = message_content_to_text(response)
-            structure = parse_content_structure_with_repair(self.llm, content_analysis)
-            logger.info(
-                "内容结构分块完成 %s/%s，源块=%s，结构项=%s",
-                chunk_index,
+        if chunks:
+            max_workers = _worker_count(
                 len(chunks),
-                len(chunk),
-                len(structure.items),
+                self.settings.document.content_analysis_max_workers,
             )
-            return chunk_index, structure
+            structures_by_index: list[ContentStructure | None] = [None] * len(chunks)
+            logger.info("调用 LLM 分块判断内容结构，并发数=%s", max_workers)
 
-        if max_workers == 1:
-            for chunk_index, chunk in enumerate(chunks, start=1):
-                result_index, structure = analyze_chunk(chunk_index, chunk)
-                structures_by_index[result_index - 1] = structure
-        else:
-            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="content-analysis") as executor:
-                futures = [
-                    executor.submit(analyze_chunk, chunk_index, chunk)
-                    for chunk_index, chunk in enumerate(chunks, start=1)
-                ]
-                for future in as_completed(futures):
-                    result_index, structure = future.result()
+            def analyze_chunk(chunk_index: int, chunk: list[dict[str, object]]) -> tuple[int, ContentStructure]:
+                """Analyze one content chunk and return its original chunk index."""
+
+                chunk_payload = _compact_content_profile(profile, chunk, chunk_index, len(chunks))
+                response = self.llm.invoke(
+                    [
+                        SystemMessage(content=self.prompt),
+                        HumanMessage(
+                            content=(
+                                "下面是用户 Word 内容的一个连续分块。全文会被分块完整处理；"
+                                "请只分析当前分块中的 blocks，保留原始 source_index，"
+                                "不要因为没有看到全文其他部分而改写或补造事实。\n"
+                                f"{json.dumps(chunk_payload, ensure_ascii=False, indent=2)}"
+                            )
+                        ),
+                    ]
+                )
+                content_analysis = message_content_to_text(response)
+                structure = parse_content_structure_with_repair(self.llm, content_analysis)
+                logger.info(
+                    "内容结构分块完成 %s/%s，源块=%s，结构项=%s",
+                    chunk_index,
+                    len(chunks),
+                    len(chunk),
+                    len(structure.items),
+                )
+                return chunk_index, structure
+
+            if max_workers == 1:
+                for chunk_index, chunk in enumerate(chunks, start=1):
+                    result_index, structure = analyze_chunk(chunk_index, chunk)
                     structures_by_index[result_index - 1] = structure
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="content-analysis") as executor:
+                    futures = [
+                        executor.submit(analyze_chunk, chunk_index, chunk)
+                        for chunk_index, chunk in enumerate(chunks, start=1)
+                    ]
+                    for future in as_completed(futures):
+                        result_index, structure = future.result()
+                        structures_by_index[result_index - 1] = structure
 
-        structures = [structure for structure in structures_by_index if structure is not None]
-        content_structure = _merge_content_structures(structures)
+            structures = [s for s in structures_by_index if s is not None]
+
+        if pre_classified:
+            structures.append(ContentStructure(items=pre_classified))
+
+        content_structure = _merge_content_structures(structures) if structures else ContentStructure()
+        llm_chunk_count = len(chunks) if chunks else 0
         logger.info(
             "内容结构合并完成，结构项=%s，必须保留事实=%s，耗时 %.2fs",
             len(content_structure.items),
@@ -330,9 +348,9 @@ class ContentDocumentAgent:
         )
         return {
             "content_profile": _compact_profile_for_state(profile),
-            "content_analysis": f"内容已按 {len(chunks)} 个分块完成结构分析并合并。",
+            "content_analysis": f"规则预分类 {len(pre_classified)} 块，LLM 分析 {llm_chunk_count} 个分块后合并。",
             "content_block_count": len(blocks),
-            "content_analysis_chunk_count": len(chunks),
+            "content_analysis_chunk_count": llm_chunk_count,
             "content_structure": content_structure,
         }
 

@@ -1,7 +1,7 @@
-"""Word 生成工作流共享数据模型。
+"""文档生成工作流共享数据模型。
 
 本模块集中维护 LangGraph 状态和 LLM 文档输出 schema，让 CLI、graph 节点和
-DOCX 写入器依赖同一组契约。
+各格式 renderer 依赖同一组契约。
 """
 
 from __future__ import annotations
@@ -12,6 +12,36 @@ from typing import TypedDict
 from pydantic import BaseModel, Field
 
 
+SEMANTIC_ROLES = (
+    "title",
+    "heading_1",
+    "heading_2",
+    "heading_3",
+    "body",
+    "list_bullet",
+    "list_number",
+    "table",
+    "code_block",
+    "blockquote",
+)
+
+ROLE_TO_DOCX_STYLE: dict[str, str] = {
+    "title": "Title",
+    "heading_1": "Heading 1",
+    "heading_2": "Heading 2",
+    "heading_3": "Heading 3",
+    "body": "Normal",
+    "list_bullet": "List Bullet",
+    "list_number": "List Number",
+    "table": "Normal",
+    "code_block": "Normal",
+    "blockquote": "Normal",
+}
+
+SUPPORTED_INPUT_EXTENSIONS = {".docx", ".tex", ".md", ".markdown", ".latex"}
+SUPPORTED_OUTPUT_EXTENSIONS = {".docx", ".tex", ".md"}
+
+
 class ContentStructureItem(BaseModel):
     """LLM 对非规整内容文档中单个源文本块的判断。"""
 
@@ -19,7 +49,6 @@ class ContentStructureItem(BaseModel):
     role: str = Field(description="title | heading_1 | heading_2 | heading_3 | body | list_item | table | note")
     text: str = Field(description="该结构项对应的源文本")
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-    reason: str = Field(default="", description="该判断的简短依据")
 
 
 class ContentStructure(BaseModel):
@@ -32,14 +61,14 @@ class ContentStructure(BaseModel):
 
 
 class GeneratedParagraph(BaseModel):
-    """要写入输出 DOCX 的单个段落。"""
+    """由 LLM 返回的单个段落，使用语义角色标识。"""
 
-    style: str = Field(default="Normal", description="Word 段落样式名称")
+    role: str = Field(default="body", description="语义角色: title|heading_1|heading_2|heading_3|body|list_bullet|list_number|table|code_block|blockquote")
     text: str = Field(description="可见段落文本")
 
 
 class GeneratedDocument(BaseModel):
-    """DOCX 渲染前由 LLM 返回的结构化文档。"""
+    """渲染前由 LLM 返回的格式中立结构化文档。"""
 
     title: str = Field(default="", description="文档标题")
     paragraphs: list[GeneratedParagraph] = Field(default_factory=list)

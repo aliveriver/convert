@@ -338,6 +338,8 @@ def write_generated_docx(
 ) -> Path:
     """基于模板将结构化生成内容渲染为新的 DOCX。"""
 
+    from word_agent.models import ROLE_TO_DOCX_STYLE
+
     logger.info("开始基于模板渲染 DOCX: template=%s output=%s", template_path, output_path)
     document = Document(template_path)
     _clear_body_keep_section_properties(document)
@@ -348,7 +350,8 @@ def write_generated_docx(
 
     for paragraph in generated.paragraphs:
         if paragraph.text.strip():
-            _add_paragraph(document, paragraph.text.strip(), paragraph.style, fallback_style)
+            style = ROLE_TO_DOCX_STYLE.get(paragraph.role, paragraph.role)
+            _add_paragraph(document, paragraph.text.strip(), style, fallback_style)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     document.save(output_path)

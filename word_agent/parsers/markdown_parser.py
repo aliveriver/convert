@@ -16,7 +16,7 @@ class MarkdownParser(DocumentParser):
 
     def parse(self, file_path: Path) -> list[UnifiedParagraph]:
         content = file_path.read_text(encoding="utf-8")
-        md = mistune.create_markdown(renderer=None)
+        md = mistune.create_markdown(renderer=None, plugins=["table", "strikethrough"])
         tokens = md(content)
         results: list[UnifiedParagraph] = []
         _walk_tokens(tokens, results)
@@ -58,14 +58,27 @@ def _walk_tokens(tokens: list, results: list[UnifiedParagraph]):
             fmt["semantic"] = _sem(element_type="blockquote")
             results.append(UnifiedParagraph(text=text.strip(), format=fmt))
 
+        elif tok_type == "table":
+            table_text = _render_table_token(token)
+            if table_text.strip():
+                fmt = empty_format("markdown")
+                fmt["semantic"] = _sem(element_type="table")
+                results.append(UnifiedParagraph(text=table_text.strip(), format=fmt))
+
         elif tok_type == "block_code":
             text = token.get("raw", "") or token.get("text", "")
             if not text.strip():
                 continue
             fmt = empty_format("markdown")
-            fmt["font_name"] = "monospace"
-            fmt["semantic"] = _sem(element_type="code_block", code=True)
-            results.append(UnifiedParagraph(text=text.strip(), format=fmt))
+            info = token.get("attrs", {}).get("info", "") if "attrs" in token else token.get("info", "")
+            if info and info.strip().lower() == "mermaid":
+                fmt["semantic"] = _sem(element_type="diagram")
+                fmt["font_name"] = "monospace"
+                results.append(UnifiedParagraph(text=text.strip(), format=fmt))
+            else:
+                fmt["font_name"] = "monospace"
+                fmt["semantic"] = _sem(element_type="code_block", code=True)
+                results.append(UnifiedParagraph(text=text.strip(), format=fmt))
 
         elif tok_type == "list":
             ordered = token.get("attrs", {}).get("ordered", False) if "attrs" in token else token.get("ordered", False)
@@ -81,6 +94,41 @@ def _sem(element_type="paragraph", heading_level=None, list_type=None, list_dept
         "list_depth": list_depth,
         "code": code,
     }
+
+
+def _render_table_token(token: dict) -> str:
+    """将 mistune table AST token 还原为 Markdown 表格文本。"""
+    rows: list[list[str]] = []
+    children = token.get("children", [])
+    for section in children:
+        sec_type = section.get("type", "")
+        if sec_type == "table_head":
+            cells = []
+            for cell in section.get("children", []):
+                cells.append(_extract_text(cell.get("children", [])))
+            rows.append(cells)
+        elif sec_type == "table_body":
+            for row in section.get("children", []):
+                cells = []
+                for cell in row.get("children", []):
+                    cells.append(_extract_text(cell.get("children", [])))
+                rows.append(cells)
+
+    if not rows:
+        return ""
+
+    col_count = max(len(r) for r in rows)
+    for r in rows:
+        while len(r) < col_count:
+            r.append("")
+
+    lines = []
+    header = rows[0]
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("| " + " | ".join("---" for _ in header) + " |")
+    for row in rows[1:]:
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
 
 
 def _walk_list_items(items: list, results: list[UnifiedParagraph], list_type: str, depth: int):

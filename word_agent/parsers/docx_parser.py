@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from docx import Document
+from docx.oxml.ns import qn
 
 from word_agent.compare_util import _effective_format
 from word_agent.parsers import DocumentParser, UnifiedParagraph
@@ -19,7 +20,7 @@ class DocxParser(DocumentParser):
         doc = Document(file_path)
         results = []
         for para in doc.paragraphs:
-            text = para.text.strip()
+            text = _extract_paragraph_text(para, doc.part)
             if not text:
                 continue
             fmt = _effective_format(para)
@@ -27,6 +28,28 @@ class DocxParser(DocumentParser):
             fmt["semantic"] = _infer_semantic(fmt)
             results.append(UnifiedParagraph(text=text, format=fmt))
         return results
+
+
+def _extract_paragraph_text(paragraph, doc_part) -> str:
+    """提取段落文本，将超链接转为 [显示文本](URL) 格式。"""
+    rels = doc_part.rels
+    parts = []
+    for child in paragraph._element:
+        if child.tag == qn("w:hyperlink"):
+            r_id = child.get(qn("r:id"))
+            display = "".join(
+                node.text or ""
+                for node in child.iter(qn("w:t"))
+            )
+            if r_id and r_id in rels:
+                url = rels[r_id].target_ref
+                parts.append(f"[{display}]({url})")
+            else:
+                parts.append(display)
+        elif child.tag == qn("w:r"):
+            for t_node in child.iter(qn("w:t")):
+                parts.append(t_node.text or "")
+    return "".join(parts).strip()
 
 
 def _infer_semantic(fmt: dict) -> dict:

@@ -23,9 +23,9 @@ warnings.filterwarnings(
 from langgraph.graph import END, START, StateGraph
 
 from word_agent.config import AppSettings, read_prompt
-from word_agent.docx_io import write_generated_docx
-from word_agent.llm import message_content_to_text, parse_generated_document_with_repair
+from word_agent.llm import build_chat_model, message_content_to_text, parse_generated_document_with_repair
 from word_agent.models import AgentState, ContentStructureItem, GeneratedDocument
+from word_agent.renderers import get_renderer
 from word_agent.subagents import ContentDocumentAgent, TemplateDocumentAgent
 
 logger = logging.getLogger(__name__)
@@ -106,8 +106,20 @@ class WordAgent:
         self.llm = llm
         self.settings = settings
         self.generation_prompt = read_prompt(generation_prompt_path)
+
+        content_llm = (
+            build_chat_model(settings.llm, settings.llm.content_analysis_model)
+            if settings.llm.content_analysis_model
+            else llm
+        )
+        self.generation_llm = (
+            build_chat_model(settings.llm, settings.llm.generation_model)
+            if settings.llm.generation_model
+            else llm
+        )
+
         self.template_agent = TemplateDocumentAgent(llm, settings, format_prompt_path)
-        self.content_agent = ContentDocumentAgent(llm, settings, content_prompt_path)
+        self.content_agent = ContentDocumentAgent(content_llm, settings, content_prompt_path)
         self._progress_callback = None
         self.graph = self._build_graph()
 
@@ -118,13 +130,13 @@ class WordAgent:
         graph.add_node("analyze_template", self._analyze_template)
         graph.add_node("analyze_content", self._analyze_content)
         graph.add_node("generate_document", self._generate_document)
-        graph.add_node("write_docx", self._write_docx)
+        graph.add_node("write_output", self._write_output)
 
         graph.add_edge(START, "analyze_template")
         graph.add_edge(START, "analyze_content")
         graph.add_edge(["analyze_template", "analyze_content"], "generate_document")
-        graph.add_edge("generate_document", "write_docx")
-        graph.add_edge("write_docx", END)
+        graph.add_edge("generate_document", "write_output")
+        graph.add_edge("write_output", END)
         return graph.compile()
 
     def run(self, template_path: Path, content_path: Path, output_path: Path, progress_callback=None) -> AgentState:
@@ -277,7 +289,7 @@ class WordAgent:
                 "当前内容分块 JSON：\n"
                 f"{json.dumps(chunk_payload, ensure_ascii=False, indent=2)}"
             )
-            response = self.llm.invoke(
+            response = self.generation_llm.invoke(
                 [
                     SystemMessage(content=self.generation_prompt),
                     HumanMessage(content=user_prompt),
@@ -286,7 +298,7 @@ class WordAgent:
             raw_response = message_content_to_text(response)
             logger.debug("最终生成分块 %s/%s LLM 原始响应前 1000 字: %s", chunk_index, len(item_chunks), raw_response[:1000])
             try:
-                generated_part = parse_generated_document_with_repair(self.llm, raw_response)
+                generated_part = parse_generated_document_with_repair(self.generation_llm, raw_response)
             except Exception:
                 debug_path = state["output_path"].with_suffix(f".generation.chunk-{chunk_index}.raw.txt")
                 debug_path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,16 +339,22 @@ class WordAgent:
         )
         return {"generated_document": generated_document}
 
-    def _write_docx(self, state: AgentState) -> AgentState:
-        """将生成段落写入基于模板的 DOCX 文件。"""
+    def _write_output(self, state: AgentState) -> AgentState:
+        """根据输出路径扩展名选择 renderer 写入最终文档。"""
 
         start_time = perf_counter()
-        logger.info("开始写入 DOCX: %s", state["output_path"])
-        written_path = write_generated_docx(
+        output_path = state["output_path"]
+        logger.info("开始写入输出文档: %s", output_path)
+
+        renderer = get_renderer(output_path)
+        from word_agent.renderers.docx_renderer import DocxRenderer
+        if isinstance(renderer, DocxRenderer):
+            renderer.fallback_style = self.settings.document.default_paragraph_style
+
+        written_path = renderer.render(
+            document=state["generated_document"],
+            output_path=output_path,
             template_path=state["template_path"],
-            output_path=state["output_path"],
-            generated=state["generated_document"],
-            fallback_style=self.settings.document.default_paragraph_style,
         )
-        logger.info("DOCX 写入完成: %s，耗时 %.2fs", written_path, perf_counter() - start_time)
+        logger.info("文档写入完成: %s，耗时 %.2fs", written_path, perf_counter() - start_time)
         return {"written_path": written_path}

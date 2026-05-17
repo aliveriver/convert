@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from queue import Empty, Queue
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,8 +23,10 @@ from slowapi.util import get_remote_address
 from word_agent.config import load_settings
 from word_agent.graph import WordAgent
 from word_agent.llm import build_chat_model
+from word_agent.models import SUPPORTED_INPUT_EXTENSIONS, SUPPORTED_OUTPUT_EXTENSIONS
 from word_agent.observability import configure_langsmith
 from word_agent.compare_util import get_doc_diff, get_doc_diff_universal
+from word_agent.format_convert import format_convert, SUPPORTED_INPUT_EXTS, SUPPORTED_OUTPUT_EXTS
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -94,6 +96,10 @@ async def page_convert():
 async def page_compare():
     return RedirectResponse(url="/frontend/compare.html")
 
+@app.get("/format-convert")
+async def page_format_convert():
+    return RedirectResponse(url="/frontend/format_convert.html")
+
 @app.get("/api/health")
 async def health():
     with _store_lock:
@@ -151,12 +157,77 @@ async def compare_docs(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+@app.post("/api/format-convert")
+@limiter.limit("10/minute")
+async def api_format_convert(
+    request: Request,
+    file: UploadFile = File(..., description="待转换文件"),
+    target_format: str = Form("md", description="目标格式: docx/md/tex"),
+):
+    if not file.filename:
+        return JSONResponse(status_code=400, content={"detail": "文件名为空"})
+
+    input_ext = Path(file.filename).suffix.lower()
+    if input_ext not in SUPPORTED_INPUT_EXTS:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"不支持的输入格式 '{input_ext}'，支持: {', '.join(sorted(SUPPORTED_INPUT_EXTS))}"},
+        )
+
+    target_format = target_format.lower().strip(".")
+    if f".{target_format}" not in SUPPORTED_OUTPUT_EXTS:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"不支持的目标格式 '{target_format}'，支持: docx, md, tex"},
+        )
+
+    target_ext = f".{target_format}"
+    if input_ext in (".md", ".markdown") and target_ext == ".md":
+        return JSONResponse(status_code=400, content={"detail": "输入格式与目标格式相同"})
+    if input_ext in (".tex", ".latex") and target_ext == ".tex":
+        return JSONResponse(status_code=400, content={"detail": "输入格式与目标格式相同"})
+    if input_ext == ".docx" and target_ext == ".docx":
+        return JSONResponse(status_code=400, content={"detail": "输入格式与目标格式相同"})
+
+    tmp_dir = tempfile.mkdtemp(prefix="word_fmt_convert_")
+    logger.info("格式转换请求: file=%s target=%s tmp=%s", file.filename, target_format, tmp_dir)
+
+    try:
+        input_path = Path(tmp_dir) / f"input{input_ext}"
+        data = await file.read()
+        if len(data) > MAX_FILE_SIZE:
+            return JSONResponse(status_code=413, content={"detail": f"文件超过 10MB 限制"})
+        input_path.write_bytes(data)
+
+        output_path = format_convert(input_path, target_format)
+
+        file_id = str(uuid.uuid4())
+        with _store_lock:
+            _file_store[file_id] = {
+                "path": output_path,
+                "created_at": time.time(),
+                "tmp_dir": tmp_dir,
+            }
+
+        logger.info("格式转换完成: file_id=%s output=%s", file_id[:8], output_path.name)
+        return JSONResponse(content={
+            "file_id": file_id,
+            "filename": output_path.name,
+            "download_url": f"/api/download/{file_id}",
+        })
+    except Exception as e:
+        logger.exception("格式转换失败")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return JSONResponse(status_code=500, content={"detail": f"转换失败: {str(e)}"})
+
+
 @app.post("/api/convert")
 @limiter.limit("3/minute")
 async def convert(
     request: Request,
-    template: UploadFile = File(..., description="模板 .docx 文件"),
-    content: UploadFile = File(..., description="内容 .docx 文件"),
+    template: UploadFile = File(..., description="模板文件 (.docx/.tex/.md)"),
+    content: UploadFile = File(..., description="内容文件 (.docx/.tex/.md)"),
+    output_format: str | None = None,
 ):
     global _daily_count, _daily_reset_date
 
@@ -175,17 +246,39 @@ async def convert(
         return JSONResponse(status_code=503, content={"detail": "服务器繁忙，请稍后再试"})
 
     for f, name in [(template, "template"), (content, "content")]:
-        if not f.filename or not f.filename.endswith(".docx"):
-            logger.warning("转换请求参数错误: %s 文件名=%s", name, f.filename)
+        if not f.filename:
+            logger.warning("转换请求参数错误: %s 文件名为空", name)
             _concurrent_sem.release()
-            return JSONResponse(status_code=400, content={"detail": f"{name} 必须是 .docx 文件"})
+            return JSONResponse(status_code=400, content={"detail": f"{name} 文件名为空"})
+        ext = Path(f.filename).suffix.lower()
+        if ext not in SUPPORTED_INPUT_EXTENSIONS:
+            logger.warning("转换请求参数错误: %s 格式不支持=%s", name, ext)
+            _concurrent_sem.release()
+            return JSONResponse(
+                status_code=400,
+                content={"detail": f"{name} 不支持的格式 '{ext}'，支持: {', '.join(sorted(SUPPORTED_INPUT_EXTENSIONS))}"},
+            )
+
+    template_ext = Path(template.filename).suffix.lower()
+    if output_format:
+        out_ext = output_format if output_format.startswith(".") else f".{output_format}"
+    else:
+        out_ext = template_ext if template_ext in SUPPORTED_OUTPUT_EXTENSIONS else ".docx"
+
+    if out_ext not in SUPPORTED_OUTPUT_EXTENSIONS:
+        _concurrent_sem.release()
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"不支持的输出格式 '{out_ext}'，支持: {', '.join(sorted(SUPPORTED_OUTPUT_EXTENSIONS))}"},
+        )
 
     tmp_dir = tempfile.mkdtemp(prefix="word_convert_")
-    template_path = Path(tmp_dir) / "template.docx"
-    content_path = Path(tmp_dir) / "content.docx"
-    output_path = Path(tmp_dir) / "output.docx"
-    logger.info("转换请求接收: template=%s content=%s file_id待分配 tmp=%s",
-                template.filename, content.filename, tmp_dir)
+    template_path = Path(tmp_dir) / f"template{template_ext}"
+    content_ext = Path(content.filename).suffix.lower()
+    content_path = Path(tmp_dir) / f"content{content_ext}"
+    output_path = Path(tmp_dir) / f"output{out_ext}"
+    logger.info("转换请求接收: template=%s content=%s output_format=%s tmp=%s",
+                template.filename, content.filename, out_ext, tmp_dir)
 
     for upload, dest in [(template, template_path), (content, content_path)]:
         data = await upload.read()
@@ -309,11 +402,21 @@ async def download(file_id: str):
         logger.warning("下载请求: file_id=%s 文件不存在(path=%s)", file_id[:8], entry["path"])
         return JSONResponse(status_code=404, content={"detail": "转换尚未完成或已失败"})
 
+    output_file = Path(entry["path"])
+    ext = output_file.suffix.lower()
+    media_types = {
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".tex": "application/x-tex",
+        ".md": "text/markdown",
+    }
+    media_type = media_types.get(ext, "application/octet-stream")
+    filename = f"converted{ext}"
+
     logger.info("下载成功: file_id=%s path=%s", file_id[:8], entry["path"])
     return FileResponse(
         path=str(entry["path"]),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename="converted.docx",
+        media_type=media_type,
+        filename=filename,
     )
 
 

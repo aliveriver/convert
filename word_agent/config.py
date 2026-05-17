@@ -28,6 +28,8 @@ class LLMSettings:
     base_url: str | None
     temperature: float
     max_tokens: int
+    content_analysis_model: str | None = None
+    generation_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,8 @@ def load_settings(config_path: Path = Path("config/settings.yaml")) -> AppSettin
         base_url=provider_data.get("base_url"),
         temperature=float(data["llm"].get("temperature", 0.2)),
         max_tokens=int(data["llm"].get("max_tokens", 4096)),
+        content_analysis_model=provider_data.get("content_analysis_model") or None,
+        generation_model=provider_data.get("generation_model") or None,
     )
     document_settings = DocumentSettings(
         max_template_chars=int(data["document"].get("max_template_chars", 0)),

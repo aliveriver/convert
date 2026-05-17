@@ -20,13 +20,14 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 logger = logging.getLogger(__name__)
 
 
-def build_chat_model(settings: LLMSettings) -> BaseChatModel:
+def build_chat_model(settings: LLMSettings, model_override: str | None = None) -> BaseChatModel:
     """为 OpenAI 兼容接口或 Anthropic API 创建 LangChain 聊天模型。"""
 
+    model = model_override or settings.model
     logger.info(
         "创建聊天模型: provider=%s model=%s base_url=%s temperature=%s max_tokens=%s",
         settings.provider,
-        settings.model,
+        model,
         settings.base_url,
         settings.temperature,
         settings.max_tokens,
@@ -35,7 +36,7 @@ def build_chat_model(settings: LLMSettings) -> BaseChatModel:
         return ChatOpenAI(
             api_key=settings.api_key,
             base_url=settings.base_url,
-            model=settings.model,
+            model=model,
             temperature=settings.temperature,
             max_tokens=settings.max_tokens,
         )
@@ -43,7 +44,7 @@ def build_chat_model(settings: LLMSettings) -> BaseChatModel:
         return ChatAnthropic(
             api_key=settings.api_key,
             base_url=settings.base_url,
-            model=settings.model,
+            model=model,
             temperature=settings.temperature,
             max_tokens=settings.max_tokens,
         )
@@ -146,13 +147,13 @@ def parse_content_structure(raw_text: str) -> ContentStructure:
 
 
 def parse_content_structure_with_repair(llm: BaseChatModel, raw_text: str) -> ContentStructure:
-    """解析内容结构 JSON，失败时自动修复一次。"""
+    """解析内容结构 JSON，失败时尝试 structured output 重新生成。"""
 
     try:
         return parse_content_structure(raw_text)
     except Exception as exc:
         logger.warning("内容结构 JSON 首次解析失败: %s", exc)
-        return repair_and_parse_json_model(llm, raw_text, ContentStructure, "内容结构")
+        return _structured_output_fallback(llm, raw_text, ContentStructure, "内容结构")
 
 
 def parse_generated_document(raw_text: str) -> GeneratedDocument:
@@ -162,10 +163,39 @@ def parse_generated_document(raw_text: str) -> GeneratedDocument:
 
 
 def parse_generated_document_with_repair(llm: BaseChatModel, raw_text: str) -> GeneratedDocument:
-    """解析生成文档 JSON，失败时自动修复一次。"""
+    """解析生成文档 JSON，失败时尝试 structured output 重新生成。"""
 
     try:
         return parse_generated_document(raw_text)
     except Exception as exc:
         logger.warning("生成文档 JSON 首次解析失败: %s", exc)
-        return repair_and_parse_json_model(llm, raw_text, GeneratedDocument, "生成文档")
+        return _structured_output_fallback(llm, raw_text, GeneratedDocument, "生成文档")
+
+
+def _structured_output_fallback(
+    llm: BaseChatModel,
+    raw_text: str,
+    model_type: type[ModelT],
+    task_name: str,
+) -> ModelT:
+    """使用 with_structured_output 让 LLM 直接输出合法结构化 JSON。"""
+
+    logger.warning("%s JSON 解析失败，使用 structured output 修复", task_name)
+    try:
+        structured_llm = llm.with_structured_output(model_type)
+        result = structured_llm.invoke(
+            [
+                SystemMessage(
+                    content=(
+                        "你是严格的 JSON 修复器。只输出合法 JSON，不要使用 Markdown。"
+                        "不要改写文本含义，不要补充新事实，只修复引号、逗号、转义、括号和字段结构。"
+                    )
+                ),
+                HumanMessage(content=f"需要修复的模型输出如下：\n{raw_text}"),
+            ]
+        )
+        logger.info("%s structured output 修复完成", task_name)
+        return result
+    except Exception:
+        logger.warning("%s structured output 不可用，回退到手动修复", task_name)
+        return repair_and_parse_json_model(llm, raw_text, model_type, task_name)
